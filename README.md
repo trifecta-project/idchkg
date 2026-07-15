@@ -173,7 +173,9 @@ src/idchkg/
   graph.py      in-memory knowledge graph + JSON/GraphML/Turtle export
   pipeline.py   orchestration (extract → judge → repair → load)
   cli.py        `idchkg build` / `idchkg query`
-examples/       coffee corpus + offline demo
+examples/       coffee demo + offline demo script
+  corpora/      representative food- & maritime-history corpora + a catalogue
+                (examples/corpora/README.md) of real datasets to scale to
 tests/          pytest suite (runs offline via the mock backend)
 ```
 

@@ -78,13 +78,30 @@ class Pipeline:
     @staticmethod
     def load_documents(paths: list[str | Path]) -> list[Document]:
         documents = []
+        seen_ids: set[str] = set()
         for raw in paths:
             path = Path(raw)
-            files = sorted(path.glob("*.txt")) + sorted(path.glob("*.md")) if path.is_dir() else [path]
+            if path.is_dir():
+                # Recurse so nested corpora (e.g. corpora/food, corpora/maritime)
+                # are all picked up. Skip README/index docs - they describe the
+                # corpus, they aren't part of it.
+                files = [
+                    f for f in sorted(path.rglob("*.txt")) + sorted(path.rglob("*.md"))
+                    if f.stem.casefold() not in {"readme", "index"}
+                ]
+            else:
+                files = [path]
             for file in files:
+                # Derive a stable id from the path so same-named files in
+                # different subfolders don't collide.
+                rel = file.stem if not path.is_dir() else "-".join(file.relative_to(path).with_suffix("").parts)
+                doc_id = slugify(rel)
+                if doc_id in seen_ids:
+                    continue
+                seen_ids.add(doc_id)
                 documents.append(
                     Document(
-                        id=slugify(file.stem),
+                        id=doc_id,
                         text=file.read_text(encoding="utf-8"),
                         title=file.stem.replace("_", " "),
                         metadata={"path": str(file)},
