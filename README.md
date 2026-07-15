@@ -5,24 +5,27 @@ Marieke van Erp's vision paper *"Unflattening Knowledge Graphs"* (K-CAP 2023,
 [DOI 10.1145/3587259.3630082](https://doi.org/10.1145/3587259.3630082)).
 
 Most knowledge graphs *flatten* the world into bare `(subject, predicate, object)`
-triples. The paper argues that entities and concepts carry **multiple
-perspectives**, **change over time**, and connect to **different narratives** —
-and that this richness is exactly what current KGs throw away. Its running
-example is *coffee*: a plant, a drink, an activity, and a concept whose history
-is entangled with colonialism and status, described very differently depending
-on who is speaking and when.
+triples. The paper's running example is *coffee*: Wikidata represents it as a
+"brewed beverage made from seeds of Coffea genus", so we cannot tell apart a
+reference to the drink, the plant, the activity of drinking it, or the colonial
+commodity — and its history is entirely absent from the structured data. The
+paper names **three crucial challenges** for "unflattening" KGs, and this
+project is built around them:
 
-This project builds an **"unflattened" graph**: every statement is a reified,
-first-class **claim** that keeps three extra dimensions the paper asks for:
-
-| Paper's challenge | What we keep on every claim |
+| Paper's challenge | How this project addresses it |
 | --- | --- |
-| **Polyvocality** — many perspectives | a `Perspective` (viewpoint, stance, sentiment) |
-| **Time** — concepts change | a `TemporalScope` (source expression + normalised dates) |
-| **Provenance** — where it came from | a `Provenance` (document, chunk, verbatim quote, judge verdicts) |
+| **1. Identity** — concepts have many dimensions; `owl:sameAs` over-merges | entities are keyed by **(label, sense)**, so coffee-the-plant, coffee-the-beverage and coffee-the-commodity are **distinct nodes** joined by context-scoped **near-identity** links, not one flat node |
+| **2. Change** — identities drift, split, merge, cease | claims carry a `TemporalScope`; the graph exposes **drift** over time and records **evolution events** (split / merge / cease / gains / loses) |
+| **3. The long tail** — infrequent entities vanish without provenance | every claim stores full **`Provenance`** (source, quote, judge verdicts) and entities keep a **mention count** to separate head from long-tail |
 
 Extraction is done by an LLM, and every extracted claim is reviewed by
 **built-in LLM judges** before it can enter the graph.
+
+> **Complementary dimension.** Each claim also carries a `Perspective`
+> (viewpoint / stance / sentiment). That isn't one of the paper's three named
+> challenges, but it follows from its remark that concepts "connect to many
+> different narratives with different opinions", and it lets the graph keep
+> disagreements (e.g. colonial writers vs. historians on coffee) side by side.
 
 ## Pipeline
 
@@ -40,7 +43,9 @@ ingest → chunk → extract (LLM) → judge (LLM panel) → repair (LLM, judge-
   - **qualifier fidelity** — are the perspective/time/quote faithful? A failure
     → the claim is sent back for **one judge-guided repair round**, then
     re-judged.
-- **Resolve** — mentions of the same entity are merged into one canonical node
+- **Resolve** — mentions are merged by **(label, sense)**, so different senses
+  of a word stay distinct and are linked by near-identity; the resolver
+  deliberately under-merges, since a wrong merge is silent and destructive
   (`src/idchkg/resolve.py`).
 - **Graph** — an in-memory `networkx.MultiDiGraph` where claims are nodes, so
   the same two entities can be linked by many claims from different viewpoints
@@ -89,9 +94,14 @@ idchkg build examples/corpus --backend ollama --model llama3.1 -o out
 # Or with Claude:
 idchkg build examples/corpus --backend anthropic -o out
 
+# the paper's three challenges:
+idchkg query out/graph.json coffee --view identity     # Ch.1 senses + near-identity
+idchkg query out/graph.json coffee --view change       # Ch.2 drift over time
+idchkg query out/graph.json        --view longtail     # Ch.3 head vs long tail
+idchkg query out/graph.json coffee --view provenance   # Ch.3 source + judge verdicts
+
+# complementary:
 idchkg query out/graph.json coffee --view perspectives
-idchkg query out/graph.json coffee --view timeline
-idchkg query out/graph.json coffee --view provenance
 idchkg query out/graph.json        --view conflicts
 ```
 
@@ -108,33 +118,58 @@ docs = pipeline.load_documents(["examples/corpus"])
 result = pipeline.run(docs)
 
 kg = result.graph
-coffee = kg.find_entity("coffee")
-kg.perspectives_on(coffee)   # {viewpoint: [claims]}
-kg.timeline(coffee)          # claims ordered by time
-kg.conflicts(coffee)         # same subject+predicate, differing object/stance
-kg.provenance_of(claim_id)   # source + quote + judge verdicts
+
+# Challenge 1 — identity
+kg.senses_of("coffee")               # distinct sense-entities for one label
+plant = kg.find_entity("coffee", sense="plant")
+kg.identity_profile(plant)           # defining properties in context
+kg.near_identities(plant)            # context-scoped near-identity links
+
+# Challenge 2 — change
+kg.drift(plant)                      # properties bucketed by time
+kg.evolution_of(plant)              # split / merge / cease / gains / loses
+
+# Challenge 3 — the long tail
+kg.long_tail()                       # {head: [...], tail: [...]} by mention count
+kg.provenance_of(claim_id)           # source + quote + judge verdicts
+
+# complementary
+kg.perspectives_on(plant)            # {viewpoint: [claims]}
+kg.conflicts(plant)                  # same subject+predicate, differing object/stance
 ```
 
 ## Query views (the "unflattening")
 
-- **perspectives** — claims about an entity grouped by the viewpoint that
-  makes them (Challenge 1).
-- **timeline** — claims about an entity ordered by temporal scope (Challenge 2).
-- **provenance** — full trace for each claim: source document, verbatim quote,
-  extractor, and every judge verdict (Challenge 3).
+The three views named for the paper's challenges:
+
+- **identity** (Ch.1) — the distinct **senses** of a concept (coffee: plant /
+  beverage / commodity …), each with its defining-property profile, plus the
+  near-identity links between them.
+- **change** (Ch.2) — how an entity's properties **drift** across time buckets,
+  plus any recorded evolution events.
+- **longtail** (Ch.3) — entities partitioned into **head** vs **long tail** by
+  mention count.
+- **provenance** (Ch.3) — full trace for each claim: source document, verbatim
+  quote, extractor, and every judge verdict.
+
+Complementary:
+
+- **perspectives** — claims about an entity grouped by the viewpoint that makes
+  them.
 - **conflicts** — groups of claims that share subject and predicate but differ
-  in object or stance: the disagreements a flat KG would silently reconcile.
+  in object or stance: disagreements a flat KG would silently reconcile.
 
 ## Layout
 
 ```
 src/idchkg/
-  models.py     data model: Entity, Claim, Perspective, TemporalScope, Provenance
+  models.py     data model: Entity(+sense), Claim(+context), Perspective,
+                TemporalScope, Provenance, IdentityLink, EvolutionEvent
   llm/          backends: anthropic, ollama, mock (schema-constrained JSON)
   prompts.py    extraction + judge prompts and JSON schemas
   extract.py    chunking + LLM extraction (+ deterministic validation gate)
   judge.py      LLM judge panel (groundedness, qualifier fidelity)
-  resolve.py    entity resolution
+  resolve.py    (label, sense) entity resolution + near-identity links
   graph.py      in-memory knowledge graph + JSON/GraphML/Turtle export
   pipeline.py   orchestration (extract → judge → repair → load)
   cli.py        `idchkg build` / `idchkg query`
@@ -153,11 +188,16 @@ calls, no network.
 
 ## Notes and next steps
 
-This is a working foundation, not a finished product. Natural extensions:
+This is a working foundation, not a finished product. Mapped to the paper's
+challenges, the natural extensions are:
 
-- an LLM **merge judge** for entity resolution (the default resolver
-  deliberately under-merges, since resolution mistakes are silent);
-- richer temporal normalisation (the extractor is asked for ISO dates, but a
-  dedicated date-parsing pass would be more robust);
-- concurrency across chunks;
-- a persistent backend (e.g. SQLite or an RDF store) behind the same graph API.
+- **Identity** — an LLM **identity/merge judge** that decides context-scoped
+  `sameAs` over *sets of properties* (as the paper's cited work proposes),
+  rather than the current deterministic (label, sense) keying;
+- **Change** — automatic **concept-drift detection** (split/merge/cease) from
+  the time-bucketed claims, instead of only hand-recorded evolution events;
+  richer temporal normalisation via a dedicated date-parsing pass;
+- **Long tail** — **knowledge enrichment** that fills gaps for infrequent
+  entities by borrowing properties from similar, better-attested ones;
+- **Engineering** — concurrency across chunks, and a persistent backend
+  (SQLite or an RDF store) behind the same graph API.

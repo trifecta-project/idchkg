@@ -114,6 +114,10 @@ class Pipeline:
                     resolver.add_mention(mention)
                 for claim in extraction.claims:
                     self._judge_and_load(claim, chunk, graph, resolver, result, verbose)
+        # Register contextual / near-identity links between senses (Challenge 1).
+        for link in resolver.identity_links:
+            graph.add_identity_link(link)
+        graph.finalize_entities(resolver.entities)
         return result
 
     def _judge_and_load(
@@ -140,8 +144,8 @@ class Pipeline:
 
             if review.decision == ACCEPT:
                 current.status = REPAIRED if was_repaired else ACCEPTED
-                subject = resolver.resolve(current.subject)
-                obj = resolver.resolve(current.object)
+                subject = resolver.resolve(current.subject, current.subject_sense)
+                obj = resolver.resolve(current.object, current.object_sense)
                 graph.add_claim(current, subject, obj)
                 (result.repaired if was_repaired else result.accepted).append(current)
                 if verbose:

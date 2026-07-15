@@ -40,6 +40,7 @@ class LLMJudge:
                 "object": claim.object,
                 "perspective": vars(claim.perspective),
                 "time": vars(claim.time),
+                "context": claim.context,
                 "quote": claim.provenance.quote if claim.provenance else "",
             },
             indent=2,

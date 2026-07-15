@@ -73,6 +73,7 @@ class Extractor:
                 "object": claim.object,
                 "perspective": vars(claim.perspective),
                 "time": vars(claim.time),
+                "context": claim.context,
                 "quote": claim.provenance.quote if claim.provenance else "",
             },
             indent=2,
@@ -96,7 +97,9 @@ class Extractor:
                 EntityMention(
                     name=name,
                     type=str(item.get("type", "concept")) or "concept",
+                    sense=str(item.get("sense", "")).strip().casefold(),
                     description=str(item.get("description", "")),
+                    context=str(item.get("context", "")).strip(),
                 )
             )
 
@@ -122,6 +125,9 @@ class Extractor:
                         valid_from=time_data.get("valid_from") or None,
                         valid_to=time_data.get("valid_to") or None,
                     ),
+                    context=str(item.get("context", "")).strip(),
+                    subject_sense=str(item.get("subject_sense", "")).strip().casefold(),
+                    object_sense=str(item.get("object_sense", "")).strip().casefold(),
                     provenance=Provenance(
                         document_id=chunk.document_id,
                         chunk_id=chunk.id,

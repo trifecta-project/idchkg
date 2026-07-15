@@ -1,13 +1,21 @@
 """In-memory knowledge graph store.
 
-Backed by a networkx MultiDiGraph. The structure is deliberately
-"unflattened": claims are first-class nodes (reified statements) linked to
-their subject/object entities, their perspective, and their source document -
-so the same pair of entities can be connected by many claims from different
-viewpoints and times without collapsing them into one edge.
+Backed by a networkx MultiDiGraph. The structure is deliberately "unflattened"
+(after van Erp, K-CAP 2023): claims are first-class reified nodes, and the
+graph is organised around the paper's three challenges.
+
+* Challenge 1 - IDENTITY: entities are keyed by (label, sense), so the plant,
+  the beverage, and the activity called "coffee" are distinct nodes, joined by
+  context-scoped near-identity links rather than one flat owl:sameAs.
+* Challenge 2 - CHANGE: claims carry temporal scope and entities carry
+  evolution events (split / merge / cease / gains / loses), so identity can be
+  followed as it drifts over time instead of a frozen snapshot.
+* Challenge 3 - THE LONG TAIL: every claim stores its provenance and judge
+  verdicts, and entities keep a mention count so head vs long-tail entities can
+  be told apart.
 
 Node kinds: entity | claim | perspective | document
-Edge kinds: subject | object | perspective | source
+Edge kinds: subject | object | perspective | source | near_identity | evolves
 """
 
 from __future__ import annotations
@@ -19,7 +27,7 @@ from pathlib import Path
 
 import networkx as nx
 
-from .models import Claim, Document, Entity, slugify
+from .models import Claim, Document, Entity, EvolutionEvent, IdentityLink, slugify
 
 
 class KnowledgeGraph:
@@ -29,6 +37,8 @@ class KnowledgeGraph:
         self._entities: dict[str, Entity] = {}
         self._documents: dict[str, Document] = {}
         self._entity_of_claim: dict[str, tuple[str, str]] = {}  # claim id -> (subj id, obj id)
+        self._identity_links: list[IdentityLink] = []
+        self._evolution: list[EvolutionEvent] = []
 
     # ------------------------------------------------------------------ build
 
@@ -45,8 +55,32 @@ class KnowledgeGraph:
             kind="entity",
             label=entity.label,
             type=entity.type,
+            sense=entity.sense,
             aliases=list(entity.aliases),
+            mention_count=entity.mention_count,
         )
+
+    def finalize_entities(self, entities: list[Entity]) -> None:
+        """Register every resolver entity (including those never used in an
+        accepted claim) and sync mention counts."""
+        for entity in entities:
+            self.add_entity(entity)
+
+    def add_identity_link(self, link: IdentityLink) -> None:
+        self._identity_links.append(link)
+        if link.left_id in self.g and link.right_id in self.g:
+            self.g.add_edge(
+                link.left_id, link.right_id,
+                kind="near_identity", relation=link.relation, context=link.context,
+            )
+
+    def add_evolution(self, event: EvolutionEvent) -> None:
+        self._evolution.append(event)
+        if event.related_id and event.entity_id in self.g and event.related_id in self.g:
+            self.g.add_edge(
+                event.entity_id, event.related_id,
+                kind="evolves", evolution=event.kind, when=event.when or "",
+            )
 
     def add_claim(self, claim: Claim, subject: Entity, obj: Entity) -> None:
         if subject.id not in self._entities:
@@ -64,6 +98,7 @@ class KnowledgeGraph:
             sentiment=claim.perspective.sentiment,
             viewpoint=claim.perspective.viewpoint,
             when=claim.time.when or "",
+            context=claim.context,
             status=claim.status,
         )
         self.g.add_edge(claim.id, subject.id, kind="subject")
@@ -90,45 +125,138 @@ class KnowledgeGraph:
     def claims(self) -> list[Claim]:
         return list(self._claims.values())
 
-    def find_entity(self, name: str) -> Entity | None:
+    @property
+    def identity_links(self) -> list[IdentityLink]:
+        return list(self._identity_links)
+
+    def find_entity(self, name: str, sense: str | None = None) -> Entity | None:
         needle = name.strip().casefold()
+        matches = [
+            e for e in self._entities.values()
+            if e.label.casefold() == needle or any(a.casefold() == needle for a in e.aliases)
+        ]
+        if sense is not None:
+            matches = [e for e in matches if e.sense == sense.strip().casefold()]
+        if matches:
+            # Prefer the most-mentioned sense when the caller didn't specify one.
+            return max(matches, key=lambda e: e.mention_count)
         for entity in self._entities.values():
-            if entity.label.casefold() == needle or any(
-                a.casefold() == needle for a in entity.aliases
-            ):
-                return entity
-        # fall back to slug match (e.g. CLI-friendly ids)
-        for entity in self._entities.values():
-            if entity.id == name or entity.id == f"ent-{slugify(name)}":
+            if entity.id in (name, f"ent-{slugify(name)}"):
                 return entity
         return None
 
     def claims_about(self, entity: Entity) -> list[Claim]:
-        """All claims in which the entity is subject or object."""
         return [
             self._claims[cid]
             for cid, (s, o) in self._entity_of_claim.items()
             if entity.id in (s, o)
         ]
 
-    # ------------------------------------------------------------- unflattened views
+    # ------------------------------------------- Challenge 1: identity
+
+    def senses_of(self, label: str) -> list[Entity]:
+        """The distinct sense-entities sharing a label - the un-flattened
+        identity of a multi-dimensional concept (e.g. coffee: plant / beverage
+        / activity / commodity)."""
+        needle = label.strip().casefold()
+        senses = [
+            e for e in self._entities.values()
+            if e.label.casefold() == needle or any(a.casefold() == needle for a in e.aliases)
+        ]
+        return sorted(senses, key=lambda e: (e.sense or "", -e.mention_count))
+
+    def identity_profile(self, entity: Entity) -> dict:
+        """The set of properties that define an entity in its context - what
+        the paper calls a richer identity profile."""
+        properties = []
+        for claim in self.claims_about(entity):
+            subj_id, obj_id = self._entity_of_claim[claim.id]
+            role = "subject" if subj_id == entity.id else "object"
+            properties.append(
+                {
+                    "role": role,
+                    "predicate": claim.predicate,
+                    "other": claim.object if role == "subject" else claim.subject,
+                    "context": claim.context,
+                    "when": claim.time.when,
+                }
+            )
+        return {
+            "id": entity.id,
+            "label": entity.label,
+            "sense": entity.sense,
+            "type": entity.type,
+            "contexts": entity.contexts,
+            "mention_count": entity.mention_count,
+            "properties": properties,
+        }
+
+    def near_identities(self, entity: Entity) -> list[IdentityLink]:
+        return [
+            link for link in self._identity_links
+            if entity.id in (link.left_id, link.right_id)
+        ]
+
+    # ------------------------------------------- Challenge 2: change
+
+    def timeline(self, entity: Entity) -> list[Claim]:
+        """Claims about an entity ordered by temporal scope; untimed last."""
+        return sorted(self.claims_about(entity), key=lambda c: c.time.sort_key())
+
+    def drift(self, entity: Entity) -> list[dict]:
+        """Concept drift: for each distinct temporal scope, the properties the
+        entity holds - so you can see what changes as it evolves over time."""
+        buckets: dict[str, list[str]] = defaultdict(list)
+        for claim in self.timeline(entity):
+            when = claim.time.when or "undated"
+            subj_id, _ = self._entity_of_claim[claim.id]
+            other = claim.object if subj_id == entity.id else claim.subject
+            buckets[when].append(f"{claim.predicate} {other}")
+        order = [c.time.when or "undated" for c in self.timeline(entity)]
+        seen: list[str] = []
+        for when in order:
+            if when not in seen:
+                seen.append(when)
+        return [{"when": when, "properties": buckets[when]} for when in seen]
+
+    def evolution_of(self, entity: Entity) -> list[EvolutionEvent]:
+        return [e for e in self._evolution if entity.id in (e.entity_id, e.related_id)]
+
+    # ------------------------------------------- Challenge 3: the long tail
+
+    def long_tail(self, head_fraction: float = 0.2) -> dict:
+        """Split entities into head (frequently mentioned) and long tail. The
+        head is the top `head_fraction` of entities by mention count."""
+        ranked = sorted(self._entities.values(), key=lambda e: e.mention_count, reverse=True)
+        if not ranked:
+            return {"head": [], "tail": []}
+        cut = max(1, int(len(ranked) * head_fraction))
+        return {
+            "head": [(e.label, e.sense, e.mention_count) for e in ranked[:cut]],
+            "tail": [(e.label, e.sense, e.mention_count) for e in ranked[cut:]],
+        }
+
+    def provenance_of(self, claim_id: str) -> dict:
+        """Full source trace for one claim - the provenance the paper insists
+        must be stored so long-tail facts don't disappear."""
+        claim = self._claims[claim_id]
+        return asdict(claim.provenance) if claim.provenance else {}
+
+    # ------------------------------------------- complementary views
 
     def perspectives_on(self, entity: Entity) -> dict[str, list[Claim]]:
-        """Challenge 1 (polyvocality): group claims about an entity by the
-        viewpoint that makes them."""
+        """Claims about an entity grouped by the viewpoint that makes them.
+        (Not one of the paper's three challenges, but drawn from its remark
+        that concepts "connect to many different narratives with different
+        opinions".)"""
         grouped: dict[str, list[Claim]] = defaultdict(list)
         for claim in self.claims_about(entity):
             grouped[claim.perspective.viewpoint].append(claim)
         return dict(grouped)
 
-    def timeline(self, entity: Entity) -> list[Claim]:
-        """Challenge 2 (time): claims about an entity ordered by temporal
-        scope; untimed claims sort last."""
-        return sorted(self.claims_about(entity), key=lambda c: c.time.sort_key())
-
     def conflicts(self, entity: Entity | None = None) -> list[list[Claim]]:
-        """Groups of claims that share subject and predicate but differ in
-        object or stance - the disagreements a flat KG would erase."""
+        """Claim groups sharing subject+predicate but differing in object or
+        stance - disagreements a flat KG would silently reconcile."""
         buckets: dict[tuple[str, str], list[Claim]] = defaultdict(list)
         scope = self.claims_about(entity) if entity else self.claims
         for claim in scope:
@@ -144,12 +272,6 @@ class KnowledgeGraph:
                 groups.append(claims)
         return groups
 
-    def provenance_of(self, claim_id: str) -> dict:
-        """Challenge 3 (provenance): full trace for one claim - source, quote,
-        extractor, and every judge verdict."""
-        claim = self._claims[claim_id]
-        return asdict(claim.provenance) if claim.provenance else {}
-
     # ------------------------------------------------------------------ export
 
     def to_dict(self) -> dict:
@@ -164,6 +286,8 @@ class KnowledgeGraph:
                 {"id": d.id, "title": d.title, "metadata": d.metadata}
                 for d in self._documents.values()
             ],
+            "identity_links": [asdict(link) for link in self._identity_links],
+            "evolution": [asdict(e) for e in self._evolution],
         }
 
     @classmethod
@@ -177,14 +301,21 @@ class KnowledgeGraph:
                 id=item["id"],
                 label=item["label"],
                 type=item.get("type", "concept"),
+                sense=item.get("sense", ""),
                 aliases=item.get("aliases", []),
                 descriptions=item.get("descriptions", []),
+                contexts=item.get("contexts", []),
+                mention_count=item.get("mention_count", 0),
             )
             entities[entity.id] = entity
             kg.add_entity(entity)
         for item in data.get("claims", []):
             claim = Claim.from_dict(item)
             kg.add_claim(claim, entities[item["subject_id"]], entities[item["object_id"]])
+        for link in data.get("identity_links", []):
+            kg.add_identity_link(IdentityLink(**link))
+        for event in data.get("evolution", []):
+            kg.add_evolution(EvolutionEvent(**event))
         return kg
 
     def save_json(self, path: str | Path) -> None:
@@ -200,18 +331,15 @@ class KnowledgeGraph:
         for node, attrs in self.g.nodes(data=True):
             export.add_node(
                 node,
-                **{
-                    k: (", ".join(v) if isinstance(v, list) else v)
-                    for k, v in attrs.items()
-                },
+                **{k: (", ".join(v) if isinstance(v, list) else v) for k, v in attrs.items()},
             )
         for u, v, attrs in self.g.edges(data=True):
             export.add_edge(u, v, **attrs)
         nx.write_graphml(export, str(path))
 
     def save_turtle(self, path: str | Path) -> None:
-        """Serialise as Turtle with reified statements, so the perspective,
-        time, and provenance qualifiers survive in RDF."""
+        """Serialise as Turtle with reified statements, so perspective, time,
+        context, and provenance qualifiers survive in RDF."""
 
         def lit(value: str) -> str:
             return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
@@ -223,9 +351,19 @@ class KnowledgeGraph:
             "",
         ]
         for entity in self._entities.values():
+            parts = [
+                f"idc:{entity.id} a idc:Entity",
+                f"rdfs:label {lit(entity.label)}",
+                f"idc:entityType {lit(entity.type)}",
+            ]
+            if entity.sense:
+                parts.append(f"idc:sense {lit(entity.sense)}")
+            lines.append(" ; ".join(parts) + " .")
+        lines.append("")
+        for link in self._identity_links:
             lines.append(
-                f"idc:{entity.id} a idc:Entity ; rdfs:label {lit(entity.label)} ; "
-                f"idc:entityType {lit(entity.type)} ."
+                f"idc:{link.left_id} idc:nearIdentity idc:{link.right_id} ."
+                f"  # {link.context}"
             )
         lines.append("")
         for claim in self._claims.values():
@@ -239,6 +377,8 @@ class KnowledgeGraph:
                 f"idc:stance {lit(claim.perspective.stance)}",
                 f"idc:sentiment {lit(claim.perspective.sentiment)}",
             ]
+            if claim.context:
+                parts.append(f"idc:context {lit(claim.context)}")
             if claim.time.when:
                 parts.append(f"idc:when {lit(claim.time.when)}")
             if claim.time.valid_from:

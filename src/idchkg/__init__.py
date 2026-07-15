@@ -2,12 +2,22 @@
 inspired by "Unflattening Knowledge Graphs" (Marieke van Erp, K-CAP 2023)."""
 
 from .graph import KnowledgeGraph
-from .models import Claim, Entity, Perspective, Provenance, TemporalScope
+from .models import (
+    Claim,
+    Entity,
+    EvolutionEvent,
+    IdentityLink,
+    Perspective,
+    Provenance,
+    TemporalScope,
+)
 from .pipeline import Pipeline, PipelineConfig, PipelineResult
 
 __all__ = [
     "Claim",
     "Entity",
+    "EvolutionEvent",
+    "IdentityLink",
     "KnowledgeGraph",
     "Perspective",
     "Pipeline",

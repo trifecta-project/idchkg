@@ -95,9 +95,24 @@ class Provenance:
 
 @dataclass
 class EntityMention:
+    """A mention of an entity in text.
+
+    ``sense`` is the dimension the mention is used in - the paper's Challenge 1
+    (identity): the concept *coffee* has a plant sense, a beverage sense, an
+    activity sense, a commodity sense. Distinguishing them is the whole point
+    of "unflattening" identity, so mentions of different senses become
+    different nodes rather than one underspecified node.
+
+    ``context`` is the qualifying scope in which the mention holds (e.g. "in
+    the botanical sense", "the ruler of Spain 1939-1975") - the contextual /
+    near-identity the paper argues owl:sameAs fails to capture.
+    """
+
     name: str
     type: str = "concept"
+    sense: str = ""
     description: str = ""
+    context: str = ""
 
     def canonical_key(self) -> str:
         return re.sub(r"\s+", " ", self.name.strip().casefold())
@@ -105,13 +120,55 @@ class EntityMention:
 
 @dataclass
 class Entity:
-    """A resolved entity node. Aggregates mentions across chunks/documents."""
+    """A resolved entity node. Aggregates mentions across chunks/documents.
+
+    An entity is identified by (label, sense): "coffee" the plant and "coffee"
+    the beverage are distinct entities, linked by near-identity rather than
+    merged (Challenge 1: identity)."""
 
     id: str
     label: str
     type: str = "concept"
+    sense: str = ""
     aliases: list[str] = field(default_factory=list)
     descriptions: list[str] = field(default_factory=list)
+    contexts: list[str] = field(default_factory=list)
+    mention_count: int = 0  # head vs long-tail signal (Challenge 3)
+
+
+@dataclass
+class IdentityLink:
+    """A context-scoped relationship between two entity nodes - the paper's
+    contextual / near-identity (Challenge 1). ``relation`` is typically
+    "near_identity" (e.g. two senses of the same word) or "same_as" (only
+    valid within ``context``)."""
+
+    left_id: str
+    right_id: str
+    relation: str = "near_identity"
+    context: str = ""
+    note: str = ""
+
+
+# Kinds of identity change over time (Challenge 2)
+SPLIT = "split"
+MERGE = "merge"
+CEASE = "cease"
+GAINS = "gains"   # entity gains a role/property
+LOSES = "loses"
+
+
+@dataclass
+class EvolutionEvent:
+    """How an entity's identity changes over time (Challenge 2: change).
+    Records where an identity splits, merges, ceases, or gains/loses a role,
+    so the graph is not a snapshot frozen in time."""
+
+    entity_id: str
+    kind: str = GAINS
+    when: str | None = None
+    note: str = ""
+    related_id: str | None = None  # the other side of a split/merge
 
 
 # Claim lifecycle statuses
@@ -134,6 +191,12 @@ class Claim:
     provenance: Provenance | None = None
     status: str = PENDING
     id: str = ""
+    # Qualifying scope in which the claim holds, and the sense of its subject /
+    # object entities (Challenge 1: identity). Kept after id so positional
+    # construction stays compatible.
+    context: str = ""
+    subject_sense: str = ""
+    object_sense: str = ""
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -145,6 +208,7 @@ class Claim:
                     self.perspective.viewpoint.casefold(),
                     self.perspective.stance,
                     self.time.when or "",
+                    self.context.casefold(),
                     self.provenance.chunk_id if self.provenance else "",
                 ]
             )
@@ -164,6 +228,9 @@ class Claim:
             object=data["object"],
             perspective=Perspective(**data.get("perspective", {})),
             time=TemporalScope(**data.get("time", {})),
+            context=data.get("context", ""),
+            subject_sense=data.get("subject_sense", ""),
+            object_sense=data.get("object_sense", ""),
             provenance=Provenance(
                 document_id=prov["document_id"],
                 chunk_id=prov["chunk_id"],

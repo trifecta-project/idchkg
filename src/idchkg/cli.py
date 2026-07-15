@@ -1,9 +1,16 @@
 """Command-line interface.
 
-    idchkg build examples/corpus -o out            # build a graph (LLM calls)
+    idchkg build examples/corpus -o out              # build a graph (LLM calls)
+
+    # The paper's three challenges:
+    idchkg query out/graph.json coffee --view identity   # Ch.1 senses/near-identity
+    idchkg query out/graph.json coffee --view change     # Ch.2 drift over time
+    idchkg query out/graph.json        --view longtail   # Ch.3 head vs long tail
+    idchkg query out/graph.json coffee --view provenance # Ch.3 source + verdicts
+
+    # Complementary views:
     idchkg query out/graph.json coffee --view perspectives
-    idchkg query out/graph.json coffee --view timeline
-    idchkg query out/graph.json --view conflicts
+    idchkg query out/graph.json        --view conflicts
 """
 
 from __future__ import annotations
@@ -21,9 +28,10 @@ from .pipeline import Pipeline, PipelineConfig
 
 def _format_claim(claim: Claim) -> str:
     time = f" [{claim.time.when}]" if claim.time.when else ""
+    context = f" ⟨{claim.context}⟩" if claim.context else ""
     return (
         f"({claim.perspective.viewpoint}, {claim.perspective.stance}, "
-        f"{claim.perspective.sentiment}){time}  "
+        f"{claim.perspective.sentiment}){time}{context}  "
         f"{claim.subject} --{claim.predicate}--> {claim.object}"
     )
 
@@ -63,6 +71,7 @@ def cmd_build(args: argparse.Namespace) -> int:
 def cmd_query(args: argparse.Namespace) -> int:
     kg = KnowledgeGraph.load_json(args.graph)
 
+    # Corpus-wide views (no entity required).
     if args.view == "conflicts":
         entity = kg.find_entity(args.entity) if args.entity else None
         groups = kg.conflicts(entity)
@@ -75,23 +84,56 @@ def cmd_query(args: argparse.Namespace) -> int:
                 print(f"  {_format_claim(claim)}")
         return 0
 
+    if args.view == "longtail":
+        split = kg.long_tail()
+        print("Head entities (frequently mentioned):")
+        for label, sense, count in split["head"]:
+            print(f"  {count:>3}  {label}{f' ({sense})' if sense else ''}")
+        print("Long tail (infrequent):")
+        for label, sense, count in split["tail"]:
+            print(f"  {count:>3}  {label}{f' ({sense})' if sense else ''}")
+        return 0
+
     if not args.entity:
         print("This view requires an entity name.", file=sys.stderr)
         return 1
     entity = kg.find_entity(args.entity)
     if entity is None:
-        known = ", ".join(sorted(e.label for e in kg.entities))
+        known = ", ".join(sorted({e.label for e in kg.entities}))
         print(f"Entity {args.entity!r} not found. Known entities: {known}", file=sys.stderr)
         return 1
 
-    if args.view == "perspectives":
+    if args.view == "identity":
+        senses = kg.senses_of(entity.label)
+        print(f"Identities of '{entity.label}' ({len(senses)} sense(s)):")
+        for sense_entity in senses:
+            profile = kg.identity_profile(sense_entity)
+            label = f"{sense_entity.label} ({sense_entity.sense or 'unspecified sense'})"
+            print(f"  {label}  [mentions: {profile['mention_count']}]")
+            for prop in profile["properties"]:
+                ctx = f"  ⟨{prop['context']}⟩" if prop["context"] else ""
+                print(f"      {prop['role']}: {prop['predicate']} {prop['other']}{ctx}")
+        links = kg.near_identities(entity)
+        if links:
+            print("Near-identity links:")
+            for link in links:
+                print(f"  {link.left_id} ~ {link.right_id}  ({link.context})")
+    elif args.view in ("change", "timeline"):
+        print(f"Change over time for '{entity.label}':")
+        for bucket in kg.drift(entity):
+            print(f"  [{bucket['when']}]")
+            for prop in bucket["properties"]:
+                print(f"      {prop}")
+        events = kg.evolution_of(entity)
+        if events:
+            print("Evolution events:")
+            for event in events:
+                print(f"  {event.kind} @ {event.when or '?'}: {event.note}")
+    elif args.view == "perspectives":
         for viewpoint, claims in kg.perspectives_on(entity).items():
             print(f"Perspective: {viewpoint}")
             for claim in claims:
                 print(f"  {_format_claim(claim)}")
-    elif args.view == "timeline":
-        for claim in kg.timeline(entity):
-            print(f"  {_format_claim(claim)}")
     elif args.view == "provenance":
         for claim in kg.claims_about(entity):
             print(f"{_format_claim(claim)}")
@@ -118,8 +160,13 @@ def main(argv: list[str] | None = None) -> int:
     query.add_argument("entity", nargs="?", default=None, help="Entity label to inspect")
     query.add_argument(
         "--view",
-        default="perspectives",
-        choices=["perspectives", "timeline", "conflicts", "provenance"],
+        default="identity",
+        choices=[
+            # the paper's three challenges
+            "identity", "change", "longtail", "provenance",
+            # complementary
+            "perspectives", "conflicts", "timeline",
+        ],
     )
     query.set_defaults(func=cmd_query)
 
