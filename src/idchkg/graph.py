@@ -125,6 +125,12 @@ class KnowledgeGraph:
     def claims(self) -> list[Claim]:
         return list(self._claims.values())
 
+    def entity_count(self) -> int:
+        return len(self._entities)
+
+    def document_count(self) -> int:
+        return len(self._documents)
+
     @property
     def identity_links(self) -> list[IdentityLink]:
         return list(self._identity_links)

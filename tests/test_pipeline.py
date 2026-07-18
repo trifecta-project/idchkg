@@ -126,3 +126,31 @@ def test_panel_score_overrides_inconsistent_passed_flag():
     claim = Claim("a", "b", "c", provenance=Provenance("d", "d#c0"))
     review = panel.review(claim, "some passage")
     assert review.decision == REJECT
+
+
+def test_repair_preserves_original_quote_when_repair_drops_it():
+    # A repair that fixes the viewpoint but returns an empty quote must not lose
+    # the original supporting quote (provenance would otherwise be incomplete).
+    mock = MockLLM().queue(
+        _extraction(_claim("coffee", "refines", "society", quote="a civilising luxury")),
+        _verdict(0.9, True),
+        _verdict(0.3, False, "viewpoint should be 'colonial writers'"),
+        _extraction(_claim("coffee", "refines", "society", viewpoint="colonial writers", quote="")),
+        _verdict(0.9, True),
+        _verdict(1.0, True),
+    )
+    result = _run(mock)
+    assert len(result.repaired) == 1
+    assert result.repaired[0].provenance.quote == "a civilising luxury"
+
+
+def test_concurrent_multichunk_run_completes():
+    from idchkg.models import Document
+
+    # 3 paragraphs -> 3 chunks processed via the worker pool (concurrency > 1).
+    # Empty mock queue -> schema-default extraction; must complete deterministically.
+    text = "Coffee is a drink.\n\nTea is a drink.\n\nSugar is a commodity."
+    pipeline = Pipeline(PipelineConfig(backend="mock", concurrency=4), extractor_client=MockLLM(), judge_client=MockLLM())
+    result = pipeline.run([Document(id="d", text=text)])
+    assert result.stats()["documents"] == 1
+    assert isinstance(result.accepted, list) and isinstance(result.errors, list)

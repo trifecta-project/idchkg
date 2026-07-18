@@ -17,7 +17,7 @@ from . import LLMError
 class OllamaClient:
     def __init__(
         self,
-        model: str = "llama3.1",
+        model: str = "granite4.1:8b",
         base_url: str = "http://localhost:11434",
         timeout: float = 300.0,
     ):

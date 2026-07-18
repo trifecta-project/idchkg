@@ -42,31 +42,52 @@ def cmd_build(args: argparse.Namespace) -> int:
         model=args.model,
         judge_model=args.judge_model,
         judge_threshold=args.threshold,
+        concurrency=args.concurrency,
     )
     pipeline = Pipeline(config)
     documents = pipeline.load_documents(args.paths)
     if not documents:
         print("No .txt or .md documents found.", file=sys.stderr)
         return 1
-    print(f"Building graph from {len(documents)} document(s) with backend '{args.backend}'...")
-    result = pipeline.run(documents, verbose=not args.quiet)
-
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    result.graph.save_json(out / "graph.json")
-    result.graph.save_graphml(out / "graph.graphml")
-    result.graph.save_turtle(out / "graph.ttl")
-    result.graph.save_sqlite(out / "graph.db")
+    print(f"Building graph from {len(documents)} document(s) with backend '{args.backend}' (store={args.store})...")
+
+    if args.store == "sqlite":
+        # Stream claims straight to graph.db — the graph is never held in RAM.
+        # The in-memory-only exports (json/graphml/ttl) are skipped.
+        from .store import GraphStore
+
+        store = GraphStore(out / "graph.db", mode="build")
+        try:
+            result = pipeline.run(documents, verbose=not args.quiet, graph=store)
+            stats = result.stats()
+            _write_report(out, result, stats)
+        finally:
+            store.close()
+        outputs = "graph.db, report.json"
+    else:
+        result = pipeline.run(documents, verbose=not args.quiet)
+        result.graph.save_json(out / "graph.json")
+        result.graph.save_graphml(out / "graph.graphml")
+        result.graph.save_turtle(out / "graph.ttl")
+        result.graph.save_sqlite(out / "graph.db")
+        stats = result.stats()
+        _write_report(out, result, stats)
+        outputs = "graph.json, graph.graphml, graph.ttl, graph.db, report.json"
+
+    print(json.dumps(stats, indent=2))
+    print(f"Wrote {outputs} to {out}/")
+    return 0
+
+
+def _write_report(out: Path, result, stats: dict) -> None:
     report = {
-        "stats": result.stats(),
+        "stats": stats,
         "rejected": [asdict(c.provenance) | {"claim": _format_claim(c)} for c in result.rejected if c.provenance],
         "errors": result.errors,
     }
     (out / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
-
-    print(json.dumps(result.stats(), indent=2))
-    print(f"Wrote graph.json, graph.graphml, graph.ttl, graph.db, report.json to {out}/")
-    return 0
 
 
 def cmd_search(args: argparse.Namespace) -> int:
@@ -83,7 +104,13 @@ def cmd_search(args: argparse.Namespace) -> int:
 
 
 def cmd_query(args: argparse.Namespace) -> int:
-    kg = KnowledgeGraph.load_json(args.graph)
+    # A .db graph is queried against SQLite (no full load); .json loads into RAM.
+    if str(args.graph).endswith(".db"):
+        from .store import GraphStore
+
+        kg = GraphStore(args.graph, mode="query")
+    else:
+        kg = KnowledgeGraph.load_json(args.graph)
 
     # Corpus-wide views (no entity required).
     if args.view == "conflicts":
@@ -166,6 +193,11 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--model", default=None, help="Model name for the chosen backend")
     build.add_argument("--judge-model", default=None, help="Separate model for the judges")
     build.add_argument("--threshold", type=float, default=0.7, help="Judge pass threshold")
+    build.add_argument("--concurrency", type=int, default=4, help="Worker threads for LLM calls (default: 4)")
+    build.add_argument(
+        "--store", default="memory", choices=["memory", "sqlite"],
+        help="memory: build in RAM + write all exports (default). sqlite: stream to graph.db, bounded memory (graph.db only)",
+    )
     build.add_argument("-q", "--quiet", action="store_true")
     build.set_defaults(func=cmd_build)
 

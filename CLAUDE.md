@@ -26,13 +26,15 @@ There is **no linter, formatter, or build step** configured — `pytest` is the 
 Running the real pipeline (makes LLM calls):
 
 ```bash
-idchkg build examples/corpus --backend ollama --model phi4-ie -o out   # or --backend anthropic
+idchkg build examples/corpus --backend ollama --model granite4.1:8b -o out   # or --backend anthropic
+idchkg build big_corpus --store sqlite --concurrency 8 -o out                 # stream to graph.db, bounded memory
 idchkg query out/graph.json coffee --view identity     # also: change, longtail, provenance, perspectives, conflicts
+idchkg query out/graph.db coffee --view identity       # a .db graph is queried against SQLite (no full load)
 idchkg search out/graph.db "coffee plant" -k 5         # BM25 retrieval over the chunk index
 python examples/corpora/fetch.py                       # populate real corpora (Gutenberg + Wikipedia) into gitignored raw/ & wiki/
 ```
 
-`build` writes `graph.json`, `graph.graphml`, `graph.ttl`, `graph.db`, and `report.json` (run stats + every rejected claim with judge reasoning) into the output dir (`out/`, gitignored).
+`build` runs LLM calls concurrently across chunks (`--concurrency`, default 4; the mutation of the graph stays single-threaded and deterministic). Default `--store memory` builds in RAM and writes `graph.json`, `graph.graphml`, `graph.ttl`, `graph.db`, `report.json`; `--store sqlite` streams claims straight to `graph.db` (bounded memory) and writes only `graph.db` + `report.json`. For Ollama, real speedup needs `OLLAMA_NUM_PARALLEL>1` on the server.
 
 ## Architecture
 
@@ -54,7 +56,9 @@ Key structural decisions to preserve when editing:
 
 - **Data model (`models.py`).** `Claim` is a reified statement (`subject/predicate/object` + `Perspective` + `TemporalScope` + `Provenance` + `context`/`subject_sense`/`object_sense`). Claim `id` is a content hash — changing which fields feed the hash (see `__post_init__`) changes claim identity and dedup. Positional field order in `Claim` is kept backward-compatible on purpose (note the comment before `context`).
 
-- **Persistence & retrieval (`store.py`).** `save_sqlite`/`load_sqlite` (also on `KnowledgeGraph`) mirror `to_dict()`/`from_dict` into a single-file SQLite DB, plus an **FTS5** virtual table over `chunk_document` chunks; `retrieve(db, query, k)` ranks with `bm25()`. networkx stays the in-memory projection — SQLite is durable storage + the search index, not a replacement graph engine. `save_json`/`from_dict` drop document text; the SQLite store keeps it (needed to rebuild chunks). See the design/decision doc at `~/.claude/plans/right-now-this-code-serialized-tiger.md` (why SQLite over DuckDB/Kùzu/lance-graph; Kùzu is archived).
+- **Persistence & retrieval (`store.py`).** Two SQLite paths over one schema + an **FTS5** chunk index (`retrieve(db, query, k)` ranks with `bm25()`): (1) `save_sqlite`/`load_sqlite` serialize a whole in-memory `KnowledgeGraph`; (2) **`GraphStore`** is a real DB-backed graph — `mode="build"` **duck-types the `KnowledgeGraph` build API** (`add_document`/`add_claim`/`add_identity_link`/`finalize_entities`) so `Pipeline.run(..., graph=store)` **streams** claims to disk without holding them in RAM, and `mode="query"` answers the view methods via SQL. GraphStore keeps only entities (few) in memory and fetches claims per query; corpus-wide `conflicts` is a SQL `GROUP BY`; per-entity views build a tiny subgraph and reuse `graph.py` logic verbatim. networkx stays the in-memory projection for the `save/load` path and viz. See the design doc at `~/.claude/plans/right-now-this-code-serialized-tiger.md` (why SQLite over DuckDB/Kùzu/lance-graph; Kùzu is archived).
+
+- **Concurrency (`pipeline.py`).** `run()` maps `_process_chunk` over chunks through a `ThreadPoolExecutor` (`PipelineConfig.concurrency`), but applies every result to the shared resolver + graph on the main thread in chunk order, so the graph is deterministic regardless of concurrency. `_map` runs sequentially for ≤1 item or `concurrency<=1` (the scripted `MockLLM` relies on deterministic call order; `MockLLM` is also lock-guarded).
 
 - **Visualization (`viz.py`, optional `[viz]` extra).** `to_yfiles_widget(kg)` renders the graph in a Jupyter notebook via yFiles; `entity_subgraph(kg, label)` scopes a focused view. Both consume `kg.g`, so they're persistence-backend-agnostic.
 

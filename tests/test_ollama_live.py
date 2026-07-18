@@ -34,7 +34,7 @@ from idchkg.prompts import (
 from idchkg.store import load_sqlite, retrieve
 
 _BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-_PREFERENCES = ["nuextract", "phi4-ie", "phi3"]
+_PREFERENCES = ["granite", "nuextract", "phi4-ie", "phi3"]
 
 
 def _available_models() -> list[str]:

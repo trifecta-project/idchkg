@@ -7,6 +7,8 @@ verdict), so the whole pipeline can run end-to-end with no model at all.
 
 from __future__ import annotations
 
+import threading
+
 
 class MockLLM:
     name = "mock"
@@ -14,16 +16,17 @@ class MockLLM:
     def __init__(self):
         self._queue: list[dict] = []
         self.calls: list[dict] = []  # recorded {system, user, schema}
+        self._lock = threading.Lock()  # pipeline may call from worker threads
 
     def queue(self, *responses: dict) -> "MockLLM":
         self._queue.extend(responses)
         return self
 
     def complete_json(self, system: str, user: str, schema: dict) -> dict:
-        self.calls.append({"system": system, "user": user, "schema": schema})
-        if self._queue:
-            return self._queue.pop(0)
-        return self._default_for(schema)
+        with self._lock:
+            self.calls.append({"system": system, "user": user, "schema": schema})
+            response = self._queue.pop(0) if self._queue else None
+        return response if response is not None else self._default_for(schema)
 
     @staticmethod
     def _default_for(schema: dict) -> dict:

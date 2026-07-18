@@ -22,11 +22,22 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from dataclasses import asdict
 from pathlib import Path
 
 from .extract import chunk_document
 from .graph import KnowledgeGraph
-from .models import Document
+from .models import (
+    Claim,
+    Document,
+    Entity,
+    EvolutionEvent,
+    IdentityLink,
+    JudgeVerdict,
+    Perspective,
+    Provenance,
+    TemporalScope,
+)
 
 _SCHEMA = """
 CREATE TABLE documents (
@@ -227,3 +238,248 @@ def retrieve(path: str | Path, query: str, k: int = 5) -> list[dict]:
         {"chunk_id": r["chunk_id"], "document_id": r["document_id"], "text": r["text"], "score": r["score"]}
         for r in rows
     ]
+
+
+# --------------------------------------------------------------------------
+# Row reconstruction (shared by GraphStore)
+# --------------------------------------------------------------------------
+
+def _entity_from_row(r) -> Entity:
+    return Entity(
+        id=r["id"], label=r["label"], type=r["type"], sense=r["sense"],
+        mention_count=r["mention_count"],
+        aliases=json.loads(r["aliases"]) if r["aliases"] else [],
+        descriptions=json.loads(r["descriptions"]) if r["descriptions"] else [],
+        contexts=json.loads(r["contexts"]) if r["contexts"] else [],
+    )
+
+
+def _claim_from_row(r) -> tuple[Claim, str, str]:
+    prov = None
+    if r["document_id"] is not None:
+        prov = Provenance(
+            document_id=r["document_id"], chunk_id=r["chunk_id"] or "",
+            quote=r["quote"] or "", extractor=r["extractor"] or "",
+            extracted_at=r["extracted_at"] or "",
+            verdicts=[JudgeVerdict(**v) for v in (json.loads(r["verdicts"]) if r["verdicts"] else [])],
+        )
+    claim = Claim(
+        subject=r["subject"], predicate=r["predicate"], object=r["object"],
+        perspective=Perspective(viewpoint=r["viewpoint"], stance=r["stance"], sentiment=r["sentiment"]),
+        time=TemporalScope(when=r["when_"], valid_from=r["valid_from"], valid_to=r["valid_to"]),
+        provenance=prov, status=r["status"], id=r["id"],
+        context=r["context"] or "", subject_sense=r["subject_sense"] or "", object_sense=r["object_sense"] or "",
+    )
+    return claim, r["subject_id"], r["object_id"]
+
+
+# --------------------------------------------------------------------------
+# GraphStore: a SQLite-backed graph that streams during build and answers
+# query views via SQL — the corpus need not be held in memory.
+# --------------------------------------------------------------------------
+
+class GraphStore:
+    """SQLite-backed knowledge graph.
+
+    * ``mode="build"`` — a write sink that **duck-types** ``KnowledgeGraph``'s
+      build API (`add_document`, `add_claim`, `add_identity_link`,
+      `finalize_entities`), so ``Pipeline.run(..., graph=store)`` streams claims
+      straight to disk instead of accumulating a networkx graph in RAM.
+    * ``mode="query"`` — mirrors ``KnowledgeGraph``'s query API for the CLI.
+
+    Entities (few — one per label+sense) are cached in memory for entity-level
+    views; claims (the bulk) stay on disk and are fetched per query. Corpus-wide
+    ``conflicts`` runs as a SQL GROUP BY so it never materialises all claims.
+    """
+
+    def __init__(self, path, mode: str = "query"):
+        self.path = str(path)
+        if mode == "build":
+            p = Path(self.path)
+            if p.exists():
+                p.unlink()
+        self.conn = sqlite3.connect(self.path)
+        self.conn.row_factory = sqlite3.Row
+        if mode == "build":
+            self.conn.executescript(_SCHEMA)
+        self._meta: KnowledgeGraph | None = None  # lazily-built entities-only view
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def close(self) -> None:
+        self.conn.close()
+
+    # ----------------------------------------------- build sink (streaming)
+
+    def add_document(self, document: Document) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO documents VALUES (?,?,?,?)",
+            (document.id, document.title, document.text, json.dumps(document.metadata, ensure_ascii=False)),
+        )
+        for chunk in chunk_document(document):
+            self.conn.execute(
+                "INSERT INTO chunks_fts (chunk_id, document_id, text) VALUES (?,?,?)",
+                (chunk.id, chunk.document_id, chunk.text),
+            )
+        self.conn.commit()  # per-document checkpoint
+
+    def add_entity(self, entity: Entity) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO entities VALUES (?,?,?,?,?,?,?,?)",
+            (
+                entity.id, entity.label, entity.type, entity.sense, entity.mention_count,
+                json.dumps(entity.aliases, ensure_ascii=False),
+                json.dumps(entity.descriptions, ensure_ascii=False),
+                json.dumps(entity.contexts, ensure_ascii=False),
+            ),
+        )
+
+    def add_claim(self, claim: Claim, subject: Entity, obj: Entity) -> None:
+        self.add_entity(subject)
+        self.add_entity(obj)
+        p = claim.provenance
+        self.conn.execute(
+            "INSERT OR REPLACE INTO claims VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                claim.id, claim.subject, claim.predicate, claim.object,
+                subject.id, obj.id, claim.subject_sense, claim.object_sense, claim.context, claim.status,
+                claim.perspective.viewpoint, claim.perspective.stance, claim.perspective.sentiment,
+                claim.time.when, claim.time.valid_from, claim.time.valid_to,
+                p.document_id if p else None, p.chunk_id if p else None, p.quote if p else None,
+                p.extractor if p else None, p.extracted_at if p else None,
+                json.dumps([vars(v) for v in p.verdicts], ensure_ascii=False) if p else None,
+            ),
+        )
+
+    def add_identity_link(self, link: IdentityLink) -> None:
+        self.conn.execute(
+            "INSERT INTO identity_links VALUES (?,?,?,?,?)",
+            (link.left_id, link.right_id, link.relation, link.context, link.note),
+        )
+
+    def add_evolution(self, event: EvolutionEvent) -> None:
+        self.conn.execute(
+            "INSERT INTO evolution VALUES (?,?,?,?,?)",
+            (event.entity_id, event.kind, event.when, event.note, event.related_id),
+        )
+
+    def finalize_entities(self, entities: list[Entity]) -> None:
+        for entity in entities:
+            self.add_entity(entity)  # write final mention counts
+        self.conn.commit()
+
+    def entity_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+
+    def document_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+
+    # ----------------------------------------------------- query (SQL-backed)
+
+    @property
+    def _meta_kg(self) -> KnowledgeGraph:
+        """Entities-only in-memory view (entities + identity links + evolution),
+        for entity-level queries. Claims are never loaded here."""
+        if self._meta is None:
+            kg = KnowledgeGraph()
+            for r in self.conn.execute("SELECT * FROM entities"):
+                kg.add_entity(_entity_from_row(r))
+            for r in self.conn.execute("SELECT * FROM identity_links"):
+                kg.add_identity_link(IdentityLink(
+                    left_id=r["left_id"], right_id=r["right_id"], relation=r["relation"],
+                    context=r["context"], note=r["note"]))
+            for r in self.conn.execute("SELECT * FROM evolution"):
+                kg.add_evolution(EvolutionEvent(
+                    entity_id=r["entity_id"], kind=r["kind"], when=r["when_"],
+                    note=r["note"], related_id=r["related_id"]))
+            self._meta = kg
+        return self._meta
+
+    @property
+    def entities(self) -> list[Entity]:
+        return self._meta_kg.entities
+
+    def find_entity(self, name, sense=None):
+        return self._meta_kg.find_entity(name, sense)
+
+    def senses_of(self, label):
+        return self._meta_kg.senses_of(label)
+
+    def long_tail(self, head_fraction: float = 0.2):
+        return self._meta_kg.long_tail(head_fraction)
+
+    def near_identities(self, entity):
+        return self._meta_kg.near_identities(entity)
+
+    def evolution_of(self, entity):
+        return self._meta_kg.evolution_of(entity)
+
+    def _kg_from_claim_rows(self, rows) -> KnowledgeGraph:
+        """Build a tiny KnowledgeGraph from some claim rows + their endpoint
+        entities, so the existing graph.py view logic can be reused verbatim."""
+        kg = KnowledgeGraph()
+        parsed, needed = [], set()
+        for r in rows:
+            claim, sid, oid = _claim_from_row(r)
+            parsed.append((claim, sid, oid))
+            needed.update((sid, oid))
+        ents: dict[str, Entity] = {}
+        if needed:
+            placeholders = ",".join("?" * len(needed))
+            for er in self.conn.execute(f"SELECT * FROM entities WHERE id IN ({placeholders})", tuple(needed)):
+                ents[er["id"]] = _entity_from_row(er)
+        for claim, sid, oid in parsed:
+            kg.add_claim(claim, ents.get(sid) or Entity(id=sid, label=sid), ents.get(oid) or Entity(id=oid, label=oid))
+        return kg
+
+    def _subgraph(self, entity_id: str) -> KnowledgeGraph:
+        rows = self.conn.execute(
+            "SELECT * FROM claims WHERE subject_id=? OR object_id=?", (entity_id, entity_id)
+        ).fetchall()
+        return self._kg_from_claim_rows(rows)
+
+    def claims_about(self, entity):
+        return self._subgraph(entity.id).claims_about(entity)
+
+    def identity_profile(self, entity):
+        return self._subgraph(entity.id).identity_profile(entity)
+
+    def drift(self, entity):
+        return self._subgraph(entity.id).drift(entity)
+
+    def timeline(self, entity):
+        return self._subgraph(entity.id).timeline(entity)
+
+    def perspectives_on(self, entity):
+        return self._subgraph(entity.id).perspectives_on(entity)
+
+    def conflicts(self, entity=None):
+        if entity is not None:
+            return self._subgraph(entity.id).conflicts(entity)
+        # Corpus-wide: find conflicting (subject, predicate) groups in SQL, then
+        # fetch only those claims — never materialise the whole claim set.
+        groups = []
+        pairs = self.conn.execute(
+            "SELECT subject_id, predicate FROM claims GROUP BY subject_id, predicate "
+            "HAVING COUNT(DISTINCT object_id) > 1 OR COUNT(DISTINCT stance) > 1"
+        ).fetchall()
+        for sid, pred in pairs:
+            rows = self.conn.execute(
+                "SELECT * FROM claims WHERE subject_id=? AND predicate=?", (sid, pred)
+            ).fetchall()
+            groups.append([_claim_from_row(r)[0] for r in rows])
+        return groups
+
+    def provenance_of(self, claim_id: str) -> dict:
+        r = self.conn.execute("SELECT * FROM claims WHERE id=?", (claim_id,)).fetchone()
+        if r is None:
+            return {}
+        claim, _, _ = _claim_from_row(r)
+        return asdict(claim.provenance) if claim.provenance else {}
+
+    def retrieve(self, query: str, k: int = 5) -> list[dict]:
+        return retrieve(self.path, query, k)
