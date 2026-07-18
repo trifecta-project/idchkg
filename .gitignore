@@ -5,3 +5,8 @@ __pycache__/
 build/
 dist/
 out/
+*.db
+
+# Fetched corpora (large; run examples/corpora/fetch.py to populate)
+examples/corpora/**/raw/
+examples/corpora/**/wiki/

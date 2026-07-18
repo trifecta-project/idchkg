@@ -56,6 +56,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     result.graph.save_json(out / "graph.json")
     result.graph.save_graphml(out / "graph.graphml")
     result.graph.save_turtle(out / "graph.ttl")
+    result.graph.save_sqlite(out / "graph.db")
     report = {
         "stats": result.stats(),
         "rejected": [asdict(c.provenance) | {"claim": _format_claim(c)} for c in result.rejected if c.provenance],
@@ -64,7 +65,20 @@ def cmd_build(args: argparse.Namespace) -> int:
     (out / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
 
     print(json.dumps(result.stats(), indent=2))
-    print(f"Wrote graph.json, graph.graphml, graph.ttl, report.json to {out}/")
+    print(f"Wrote graph.json, graph.graphml, graph.ttl, graph.db, report.json to {out}/")
+    return 0
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    from .store import retrieve
+
+    hits = retrieve(args.db, args.query, k=args.k)
+    if not hits:
+        print("No matches.")
+        return 0
+    for hit in hits:
+        snippet = " ".join(hit["text"].split())[:120]
+        print(f"[{hit['score']:.3f}] {hit['document_id']} ({hit['chunk_id']})  {snippet}")
     return 0
 
 
@@ -169,6 +183,12 @@ def main(argv: list[str] | None = None) -> int:
         ],
     )
     query.set_defaults(func=cmd_query)
+
+    search = sub.add_parser("search", help="BM25 retrieval over a graph.db chunk index")
+    search.add_argument("db", help="Path to graph.db")
+    search.add_argument("query", help="Search query")
+    search.add_argument("-k", type=int, default=5, help="Number of hits (default: 5)")
+    search.set_defaults(func=cmd_search)
 
     args = parser.parse_args(argv)
     return args.func(args)

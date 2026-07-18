@@ -325,6 +325,18 @@ class KnowledgeGraph:
     def load_json(cls, path: str | Path) -> "KnowledgeGraph":
         return cls.from_dict(json.loads(Path(path).read_text()))
 
+    def save_sqlite(self, path: str | Path) -> None:
+        """Persist the graph + a BM25 chunk index to a single SQLite file."""
+        from .store import save_sqlite
+
+        save_sqlite(self, path)
+
+    @classmethod
+    def load_sqlite(cls, path: str | Path) -> "KnowledgeGraph":
+        from .store import load_sqlite
+
+        return load_sqlite(path)
+
     def save_graphml(self, path: str | Path) -> None:
         # GraphML supports only scalar attributes.
         export = nx.MultiDiGraph()

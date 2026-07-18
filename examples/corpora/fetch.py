@@ -1,20 +1,32 @@
-"""Download a curated set of public-domain food- and maritime-history texts
-from Project Gutenberg into food/raw/ and maritime/raw/.
+"""Download real food- and maritime-history corpora into the corpora folders.
 
-Run this in an environment with open network access (some sandboxes block
-gutenberg.org). Stdlib only.
+Two sources, both stdlib-only, run in an environment with open network access
+(some sandboxes block gutenberg.org / wikipedia.org):
 
-    python examples/corpora/fetch.py
-    idchkg build examples/corpora/food/raw --backend ollama -o out-food
+* Project Gutenberg public-domain books  -> food/raw/,  maritime/raw/
+* Wikipedia article plain text (CC BY-SA) -> food/wiki/, maritime/wiki/
+
+    python examples/corpora/fetch.py               # both sources
+    python examples/corpora/fetch.py --gutenberg   # books only
+    python examples/corpora/fetch.py --wikipedia   # wiki only
+
+    idchkg build examples/corpora --backend ollama --model phi4-ie -o out
+
+The fetched folders are gitignored; the small hand-written samples in food/ and
+maritime/ stay committed. Wikipedia text is CC BY-SA — attribute if you
+redistribute derived graphs (see README).
 """
 
 from __future__ import annotations
 
+import json
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
+# --- Project Gutenberg (public domain) ------------------------------------
 # (gutenberg ebook id, output filename). Plain-text URLs are derived below.
 FOOD = [
     (28500, "ukers_all_about_coffee.txt"),      # W. H. Ukers, All About Coffee (1922)
@@ -27,7 +39,26 @@ MARITIME = [
     (2055, "dana_two_years_before_the_mast.txt"),  # Dana, Two Years Before the Mast
 ]
 
+# --- Wikipedia (CC BY-SA) -------------------------------------------------
+# Cross-linked history articles from the catalogue; the interlinking exercises
+# cross-document entity resolution, multiple senses, and opposing viewpoints.
+WIKI = {
+    "food": [
+        "History of coffee", "History of sugar", "History of tea",
+        "Spice trade", "Columbian exchange",
+    ],
+    "maritime": [
+        "Dutch East India Company", "Age of Sail", "Atlantic slave trade",
+        "Hanseatic League", "Triangular trade",
+    ],
+}
+
 HERE = Path(__file__).resolve().parent
+USER_AGENT = "idchkg-corpus-fetch (https://github.com/; educational use)"
+
+
+def _slug(title: str) -> str:
+    return title.lower().replace(" ", "_").replace("/", "-") + ".txt"
 
 
 def gutenberg_urls(ebook_id: int) -> list[str]:
@@ -39,35 +70,85 @@ def gutenberg_urls(ebook_id: int) -> list[str]:
     ]
 
 
-def fetch(ebook_id: int, dest: Path) -> bool:
+def _get(url: str, timeout: float = 60) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def fetch_gutenberg(ebook_id: int, dest: Path) -> bool:
     for url in gutenberg_urls(ebook_id):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "idchkg-corpus-fetch"})
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                data = resp.read().decode("utf-8", errors="replace")
-            dest.write_text(data, encoding="utf-8")
-            print(f"  ok   {dest.name}  ({len(data):,} chars)")
-            return True
+            data = _get(url)
         except urllib.error.URLError:
             continue
+        dest.write_text(data, encoding="utf-8")
+        print(f"  ok   {dest.name}  ({len(data):,} chars)")
+        return True
     print(f"  FAIL {dest.name}  (ebook {ebook_id} unreachable)", file=sys.stderr)
     return False
 
 
-def main() -> int:
+def fetch_wikipedia(title: str, dest: Path) -> bool:
+    # action=query&prop=extracts&explaintext gives the full article as plain text.
+    params = urllib.parse.urlencode(
+        {
+            "action": "query", "prop": "extracts", "explaintext": "1",
+            "redirects": "1", "format": "json", "titles": title,
+        }
+    )
+    try:
+        payload = json.loads(_get(f"https://en.wikipedia.org/w/api.php?{params}", timeout=60))
+        pages = payload["query"]["pages"]
+        page = next(iter(pages.values()))
+        text = page.get("extract", "")
+    except (urllib.error.URLError, KeyError, StopIteration, json.JSONDecodeError):
+        text = ""
+    if not text.strip():
+        print(f"  FAIL {dest.name}  ('{title}' unreachable or empty)", file=sys.stderr)
+        return False
+    header = f"# {title}\n# Source: Wikipedia (CC BY-SA 4.0)\n\n"
+    dest.write_text(header + text, encoding="utf-8")
+    print(f"  ok   {dest.name}  ({len(text):,} chars)")
+    return True
+
+
+def run_gutenberg() -> bool:
     ok = True
     for group, items in (("food", FOOD), ("maritime", MARITIME)):
         out = HERE / group / "raw"
         out.mkdir(parents=True, exist_ok=True)
-        print(f"{group}/raw:")
+        print(f"{group}/raw (Project Gutenberg):")
         for ebook_id, name in items:
-            ok = fetch(ebook_id, out / name) and ok
+            ok = fetch_gutenberg(ebook_id, out / name) and ok
+    return ok
+
+
+def run_wikipedia() -> bool:
+    ok = True
+    for group, titles in WIKI.items():
+        out = HERE / group / "wiki"
+        out.mkdir(parents=True, exist_ok=True)
+        print(f"{group}/wiki (Wikipedia, CC BY-SA):")
+        for title in titles:
+            ok = fetch_wikipedia(title, out / _slug(title)) and ok
+    return ok
+
+
+def main(argv: list[str]) -> int:
+    do_gutenberg = "--wikipedia" not in argv
+    do_wikipedia = "--gutenberg" not in argv
+    ok = True
+    if do_gutenberg:
+        ok = run_gutenberg() and ok
+    if do_wikipedia:
+        ok = run_wikipedia() and ok
     if not ok:
         print("\nSome downloads failed (network likely restricted).", file=sys.stderr)
         return 1
-    print("\nDone. Build with e.g.:  idchkg build examples/corpora/food/raw -o out-food")
+    print("\nDone. Build with e.g.:  idchkg build examples/corpora --backend ollama --model phi4-ie -o out")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))
