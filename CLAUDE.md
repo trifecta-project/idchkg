@@ -31,10 +31,13 @@ idchkg build big_corpus --store sqlite --concurrency 8 -o out                 # 
 idchkg query out/graph.json coffee --view identity     # also: change, longtail, provenance, perspectives, conflicts
 idchkg query out/graph.db coffee --view identity       # a .db graph is queried against SQLite (no full load)
 idchkg search out/graph.db "coffee plant" -k 5         # BM25 retrieval over the chunk index
+idchkg site out/graph.db -o site/                      # generate a static browse site (open site/index.html)
 python examples/corpora/fetch.py                       # populate real corpora (Gutenberg + Wikipedia) into gitignored raw/ & wiki/
 ```
 
 `build` runs LLM calls concurrently across chunks (`--concurrency`, default 4; the mutation of the graph stays single-threaded and deterministic). Default `--store memory` builds in RAM and writes `graph.json`, `graph.graphml`, `graph.ttl`, `graph.db`, `report.json`; `--store sqlite` streams claims straight to `graph.db` (bounded memory) and writes only `graph.db` + `report.json`. For Ollama, real speedup needs `OLLAMA_NUM_PARALLEL>1` on the server.
+
+`build` logs (stdlib `logging`, configured in `cli.py:main`): INFO shows per-chunk progress + an **end-of-run timing breakdown** (extraction vs judging wall time/calls — the "why is it slow" summary); `-v` adds per-call LLM metrics (tok/s, model-load ms — from Ollama's own response fields); `-q` quiets to warnings. Library code uses module loggers and emits no output unless the host configures logging (or `Pipeline.run(verbose=True)`, which turns on a console handler — used by the notebook). Judging is usually the call-count driver: **2 judge calls per claim vs 1 extraction per chunk**.
 
 ## Architecture
 
@@ -61,6 +64,8 @@ Key structural decisions to preserve when editing:
 - **Concurrency (`pipeline.py`).** `run()` maps `_process_chunk` over chunks through a `ThreadPoolExecutor` (`PipelineConfig.concurrency`), but applies every result to the shared resolver + graph on the main thread in chunk order, so the graph is deterministic regardless of concurrency. `_map` runs sequentially for ≤1 item or `concurrency<=1` (the scripted `MockLLM` relies on deterministic call order; `MockLLM` is also lock-guarded).
 
 - **Visualization (`viz.py`, optional `[viz]` extra).** `to_yfiles_widget(kg)` renders the graph in a Jupyter notebook via yFiles; `entity_subgraph(kg, label)` scopes a focused view. Both consume `kg.g`, so they're persistence-backend-agnostic.
+
+- **Static web site (`site.py`).** `build_site(graph, out_dir)` (CLI: `idchkg site`) renders a zero-dependency, entity-per-page browse site — pre-rendered HTML + one CSS + a few lines of vanilla JS, works over `file://`. It calls the same view API on a `GraphStore` or `KnowledgeGraph`, so it's source-agnostic. The entity page centres on **perspectives** (`perspectives_on` claims grouped by viewpoint, with stance/sentiment chips, verbatim quote, source, and `<details>` judge verdicts). All LLM-extracted text is `html.escape`d. Styling target is trifecta.dhlab.nl (clean academic/DH). Cross-links use a `(canonical label, sense)` lookup mirroring the resolver.
 
 ## Testing conventions
 

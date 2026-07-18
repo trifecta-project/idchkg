@@ -144,6 +144,21 @@ def test_repair_preserves_original_quote_when_repair_drops_it():
     assert result.repaired[0].provenance.quote == "a civilising luxury"
 
 
+def test_pipeline_emits_run_summary(caplog):
+    import logging
+
+    mock = MockLLM().queue(
+        _extraction(_claim("coffee", "is a", "beverage")),
+        _verdict(1.0, True),
+        _verdict(1.0, True),
+    )
+    with caplog.at_level(logging.INFO, logger="idchkg"):
+        _run(mock)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("building graph" in m for m in messages)
+    assert any("run complete" in m for m in messages)  # the timing breakdown
+
+
 def test_concurrent_multichunk_run_completes():
     from idchkg.models import Document
 

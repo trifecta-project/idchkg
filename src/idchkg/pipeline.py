@@ -15,6 +15,9 @@ regardless of concurrency.
 
 from __future__ import annotations
 
+import logging
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +28,35 @@ from .judge import ACCEPT, REVISE, JudgePanel
 from .llm import LLMClient, LLMError, get_client
 from .models import ACCEPTED, REJECTED, REPAIRED, Chunk, Claim, Document, EntityMention, slugify
 from .resolve import EntityResolver
+
+logger = logging.getLogger(__name__)
+
+
+class _Timing:
+    """Thread-safe accumulator of per-phase LLM wall time + call counts, so the
+    run summary can show whether extraction or judging dominates."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.extract_s = self.judge_s = self.repair_s = 0.0
+        self.extract_n = self.judge_n = self.repair_n = 0
+
+    def add(self, phase: str, seconds: float) -> None:
+        with self._lock:
+            setattr(self, f"{phase}_s", getattr(self, f"{phase}_s") + seconds)
+            setattr(self, f"{phase}_n", getattr(self, f"{phase}_n") + 1)
+
+
+def _enable_verbose_logging() -> None:
+    """Make `Pipeline.run(verbose=True)` show logs even when the host app hasn't
+    configured logging (e.g. a notebook). No-op if handlers already exist (the
+    CLI configures logging itself via basicConfig)."""
+    package = logging.getLogger("idchkg")
+    package.setLevel(logging.DEBUG)
+    if not logging.getLogger().handlers and not package.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", "%H:%M:%S"))
+        package.addHandler(handler)
 
 
 @dataclass
@@ -144,30 +176,58 @@ class Pipeline:
         # `graph` is a build sink: an in-memory KnowledgeGraph (default) or a
         # streaming GraphStore (store.py) that writes to SQLite as it goes, so a
         # large corpus need not be held in RAM. Both share the build API.
+        if verbose:
+            _enable_verbose_logging()
         graph = graph if graph is not None else KnowledgeGraph()
         resolver = EntityResolver(aliases=self.config.aliases)
         result = PipelineResult(graph=graph)
+        self._timing = _Timing()  # per-run; read by the worker methods below
 
         chunks: list[Chunk] = []
         for document in documents:
             graph.add_document(document)
             chunks.extend(chunk_document(document, max_chars=self.config.chunk_chars))
 
+        started = time.perf_counter()
+        logger.info(
+            "building graph: %d document(s), %d chunk(s), backend=%s, concurrency=%d",
+            len(documents), len(chunks), self.config.backend, self.config.concurrency,
+        )
+
         # LLM work per chunk runs concurrently; results are applied in order.
         for chunk, work in zip(chunks, self._map(self._process_chunk, chunks)):
-            if verbose:
-                print(f"[chunk] {chunk.id}")
             result.errors.extend(work.errors)
             for mention in work.mentions:
                 resolver.add_mention(mention)
             for outcome in work.outcomes:
-                self._apply_outcome(outcome, graph, resolver, result, verbose)
+                self._apply_outcome(outcome, graph, resolver, result)
 
         # Register contextual / near-identity links between senses (Challenge 1).
         for link in resolver.identity_links:
             graph.add_identity_link(link)
         graph.finalize_entities(resolver.entities)
+
+        self._log_summary(time.perf_counter() - started, result)
         return result
+
+    def _log_summary(self, wall: float, result: PipelineResult) -> None:
+        t = self._timing
+        # Per-phase times are cumulative across worker threads, so their sum can
+        # exceed the wall time when concurrency>1 — the ratio still shows which
+        # phase dominates (usually judging: 2 model calls per claim vs 1 extract).
+        logger.info(
+            "run complete in %.1fs — extraction: %d calls / %.1fs (%.1fs avg); "
+            "judging: %d reviews / %.1fs (%.1fs avg, <=2 model calls each); repairs: %d / %.1fs",
+            wall,
+            t.extract_n, t.extract_s, t.extract_s / max(t.extract_n, 1),
+            t.judge_n, t.judge_s, t.judge_s / max(t.judge_n, 1),
+            t.repair_n, t.repair_s,
+        )
+        logger.info(
+            "accepted=%d repaired=%d rejected=%d errors=%d entities=%d",
+            len(result.accepted), len(result.repaired), len(result.rejected),
+            len(result.errors), result.graph.entity_count(),
+        )
 
     # --------------------------------------------------------------- internals
 
@@ -183,10 +243,15 @@ class Pipeline:
     def _process_chunk(self, chunk: Chunk) -> _ChunkWork:
         """All LLM work for one chunk — runs in a worker thread, touches no
         shared state (only the per-chunk objects it creates)."""
+        started = time.perf_counter()
         try:
             extraction = self.extractor.extract(chunk)
         except LLMError as exc:
+            logger.warning("chunk %s: extraction failed: %s", chunk.id, exc)
             return _ChunkWork(errors=[f"{chunk.id}: extraction failed: {exc}"])
+        elapsed = time.perf_counter() - started
+        self._timing.add("extract", elapsed)
+        logger.info("chunk %s: %d claim(s) extracted in %.1fs", chunk.id, len(extraction.claims), elapsed)
         work = _ChunkWork(
             mentions=list(extraction.entities),
             errors=[f"{chunk.id}: {e}" for e in extraction.errors],
@@ -204,10 +269,13 @@ class Pipeline:
         mentions: list[EntityMention] = []
 
         while True:
+            started = time.perf_counter()
             try:
                 review = self.panel.review(current, chunk.text)
             except LLMError as exc:
+                logger.warning("%s: judging failed: %s", current.id, exc)
                 return _ClaimOutcome(error=f"{current.id}: judging failed: {exc}")
+            self._timing.add("judge", time.perf_counter() - started)
             if current.provenance:
                 current.provenance.verdicts.extend(review.verdicts)
 
@@ -216,10 +284,13 @@ class Pipeline:
 
             if review.decision == REVISE and repairs_left > 0:
                 repairs_left -= 1
+                started = time.perf_counter()
                 try:
                     extraction = self.extractor.repair(chunk, current, review.feedback)
                 except LLMError as exc:
+                    logger.warning("%s: repair failed: %s", current.id, exc)
                     return _ClaimOutcome(error=f"{current.id}: repair failed: {exc}")
+                self._timing.add("repair", time.perf_counter() - started)
                 if extraction and extraction.claims:
                     mentions.extend(extraction.entities)
                     repaired = extraction.claims[0]
@@ -238,7 +309,7 @@ class Pipeline:
 
             return _ClaimOutcome(claim=current, accepted=False, was_repaired=was_repaired, mentions=mentions)
 
-    def _apply_outcome(self, outcome, graph, resolver, result, verbose) -> None:
+    def _apply_outcome(self, outcome, graph, resolver, result) -> None:
         """Apply a claim outcome to the shared resolver + graph (main thread)."""
         if outcome.error:
             result.errors.append(outcome.error)
@@ -252,10 +323,7 @@ class Pipeline:
             obj = resolver.resolve(claim.object, claim.object_sense)
             graph.add_claim(claim, subject, obj)
             (result.repaired if outcome.was_repaired else result.accepted).append(claim)
-            if verbose:
-                print(f"  [{claim.status}] {claim.subject} --{claim.predicate}--> {claim.object}")
         else:
             claim.status = REJECTED
             result.rejected.append(claim)
-            if verbose:
-                print(f"  [rejected] {claim.subject} --{claim.predicate}--> {claim.object}")
+        logger.debug("[%s] %s --%s--> %s", claim.status, claim.subject, claim.predicate, claim.object)

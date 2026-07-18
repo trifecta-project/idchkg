@@ -131,6 +131,25 @@ class KnowledgeGraph:
     def document_count(self) -> int:
         return len(self._documents)
 
+    def claim_count(self) -> int:
+        return len(self._claims)
+
+    def documents(self) -> list[Document]:
+        return list(self._documents.values())
+
+    def claims_in_document(self, document_id: str) -> list[Claim]:
+        return [
+            c for c in self._claims.values()
+            if c.provenance and c.provenance.document_id == document_id
+        ]
+
+    def dated_claims(self) -> list[Claim]:
+        """Claims with any temporal scope, in chronological order (for a timeline)."""
+        return sorted(
+            (c for c in self._claims.values() if not c.time.is_empty()),
+            key=lambda c: c.time.sort_key(),
+        )
+
     @property
     def identity_links(self) -> list[IdentityLink]:
         return list(self._identity_links)

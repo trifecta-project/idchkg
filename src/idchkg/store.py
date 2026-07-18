@@ -378,6 +378,26 @@ class GraphStore:
     def document_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
 
+    def claim_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
+
+    def documents(self) -> list[Document]:
+        return [
+            Document(id=r["id"], text=r["text"] or "", title=r["title"] or "",
+                     metadata=json.loads(r["metadata"] or "{}"))
+            for r in self.conn.execute("SELECT * FROM documents")
+        ]
+
+    def claims_in_document(self, document_id: str) -> list[Claim]:
+        rows = self.conn.execute("SELECT * FROM claims WHERE document_id=?", (document_id,)).fetchall()
+        return [_claim_from_row(r)[0] for r in rows]
+
+    def dated_claims(self) -> list[Claim]:
+        rows = self.conn.execute(
+            "SELECT * FROM claims WHERE when_ IS NOT NULL OR valid_from IS NOT NULL"
+        ).fetchall()
+        return sorted((_claim_from_row(r)[0] for r in rows), key=lambda c: c.time.sort_key())
+
     # ----------------------------------------------------- query (SQL-backed)
 
     @property

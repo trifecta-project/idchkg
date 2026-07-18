@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -60,14 +61,14 @@ def cmd_build(args: argparse.Namespace) -> int:
 
         store = GraphStore(out / "graph.db", mode="build")
         try:
-            result = pipeline.run(documents, verbose=not args.quiet, graph=store)
+            result = pipeline.run(documents, graph=store)
             stats = result.stats()
             _write_report(out, result, stats)
         finally:
             store.close()
         outputs = "graph.db, report.json"
     else:
-        result = pipeline.run(documents, verbose=not args.quiet)
+        result = pipeline.run(documents)
         result.graph.save_json(out / "graph.json")
         result.graph.save_graphml(out / "graph.graphml")
         result.graph.save_turtle(out / "graph.ttl")
@@ -100,6 +101,23 @@ def cmd_search(args: argparse.Namespace) -> int:
     for hit in hits:
         snippet = " ".join(hit["text"].split())[:120]
         print(f"[{hit['score']:.3f}] {hit['document_id']} ({hit['chunk_id']})  {snippet}")
+    return 0
+
+
+def cmd_site(args: argparse.Namespace) -> int:
+    from .site import build_site
+
+    if str(args.graph).endswith(".db"):
+        from .store import GraphStore
+
+        graph = GraphStore(args.graph, mode="query")
+        try:
+            out = build_site(graph, args.out)
+        finally:
+            graph.close()
+    else:
+        out = build_site(KnowledgeGraph.load_json(args.graph), args.out)
+    print(f"Wrote static site to {out}/ — open {out}/index.html (or: python -m http.server -d {out})")
     return 0
 
 
@@ -198,7 +216,8 @@ def main(argv: list[str] | None = None) -> int:
         "--store", default="memory", choices=["memory", "sqlite"],
         help="memory: build in RAM + write all exports (default). sqlite: stream to graph.db, bounded memory (graph.db only)",
     )
-    build.add_argument("-q", "--quiet", action="store_true")
+    build.add_argument("-q", "--quiet", action="store_true", help="Only warnings/errors")
+    build.add_argument("-v", "--verbose", action="store_true", help="Per-call LLM timing/token metrics (DEBUG)")
     build.set_defaults(func=cmd_build)
 
     query = sub.add_parser("query", help="Query a previously built graph.json")
@@ -222,7 +241,22 @@ def main(argv: list[str] | None = None) -> int:
     search.add_argument("-k", type=int, default=5, help="Number of hits (default: 5)")
     search.set_defaults(func=cmd_search)
 
+    site = sub.add_parser("site", help="Generate a static web site to browse a built graph")
+    site.add_argument("graph", help="Path to graph.db or graph.json")
+    site.add_argument("-o", "--out", default="site", help="Output directory (default: site)")
+    site.set_defaults(func=cmd_site)
+
     args = parser.parse_args(argv)
+
+    # INFO shows progress + the end-of-run timing breakdown; -v adds per-call LLM
+    # metrics (tok/s, load time); -q quiets to warnings.
+    level = logging.DEBUG if getattr(args, "verbose", False) else (
+        logging.WARNING if getattr(args, "quiet", False) else logging.INFO
+    )
+    logging.basicConfig(
+        level=level, stream=sys.stderr,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S",
+    )
     return args.func(args)
 
 
