@@ -69,13 +69,67 @@ The same schema-constrained interface (`complete_json`) is used for both
 extraction and judging, so any backend works for both roles — and you can even
 use *different* models for extractor and judge.
 
-## Install
+## Setup
+
+### 1. Prerequisites
+
+- **Python 3.10+** (developed on 3.13). Check with `python3 --version`.
+- **git**, to clone the repo.
+- **An LLM backend** — pick at least one:
+  - **Ollama** (recommended, fully local, no key) — install from
+    [ollama.com](https://ollama.com), then pull a model (see step 4).
+  - **Anthropic / Claude** — an `ANTHROPIC_API_KEY` (structured-output SDK).
+  - Neither is needed to run the offline demo or the test suite, which use the
+    built-in scriptable `mock` backend.
+
+### 2. Get the code
 
 ```bash
-pip install -e .                 # core (networkx only)
-pip install -e '.[anthropic]'    # + Claude backend
-pip install -e '.[dev]'          # + pytest
+git clone <this-repo-url> idchkg
+cd idchkg
 ```
+
+### 3. Create a virtual environment and install
+
+Using the standard library `venv`:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+
+pip install -e .                     # core (networkx only)
+pip install -e '.[dev]'              # + pytest (to run the tests)
+pip install -e '.[anthropic]'        # + Claude backend (optional)
+pip install -e '.[viz]'              # + yFiles notebook viz (optional)
+# combine extras: pip install -e '.[dev,anthropic,viz]'
+```
+
+Prefer [`uv`](https://docs.astral.sh/uv/)? It's faster and what this repo is
+developed with:
+
+```bash
+uv venv                              # creates .venv/
+uv pip install --python .venv/bin/python -e '.[dev]'
+```
+
+### 4. (If using Ollama) start the server and pull a model
+
+```bash
+ollama serve                         # or just run the Ollama app; listens on localhost:11434
+ollama pull granite4.1:8b            # the model used in the examples below
+```
+
+Any instruction/extraction model works. For real concurrency across chunks,
+start the server with `OLLAMA_NUM_PARALLEL=4` (or higher).
+
+### 5. Verify the install
+
+```bash
+pytest                               # full suite, runs offline via the mock backend
+python examples/demo_coffee.py       # offline end-to-end demo (no API key)
+```
+
+Both should pass without any network access or API key.
 
 ## Use it
 
@@ -89,7 +143,7 @@ Build a graph from your own documents and query it:
 
 ```bash
 # Fully local with Ollama:
-idchkg build examples/corpus --backend ollama --model llama3.1 -o out
+idchkg build examples/corpus --backend ollama --model granite4.1:8b -o out
 
 # Or with Claude:
 idchkg build examples/corpus --backend anthropic -o out
@@ -105,8 +159,24 @@ idchkg query out/graph.json coffee --view perspectives
 idchkg query out/graph.json        --view conflicts
 ```
 
-`build` writes `graph.json`, `graph.graphml`, `graph.ttl`, and a `report.json`
-containing the run stats plus every rejected claim with the judges' reasoning.
+`build` writes `graph.json`, `graph.graphml`, `graph.ttl`, `graph.db`, and a
+`report.json` containing the run stats plus every rejected claim with the judges'
+reasoning. Build logs per-chunk progress and an end-of-run timing breakdown
+(`-v` for per-call LLM metrics, `-q` to quiet).
+
+For larger corpora, stream straight to SQLite instead of holding the graph in
+RAM, and run LLM calls concurrently across chunks:
+
+```bash
+idchkg build big_corpus --store sqlite --concurrency 8 -o out   # writes only graph.db + report.json
+idchkg query out/graph.db coffee --view identity                # a .db graph is queried via SQL, not fully loaded
+idchkg search out/graph.db "coffee plant" -k 5                  # BM25 retrieval over the chunk index
+idchkg site out/graph.db -o site/                              # static browse site (open site/index.html)
+```
+
+Want to try it on real text? `python examples/corpora/fetch.py` populates
+representative corpora (Project Gutenberg + Wikipedia) into a gitignored
+`raw/`/`wiki/` you can point `build` at.
 
 ### As a library
 
