@@ -178,6 +178,24 @@ Want to try it on real text? `python examples/corpora/fetch.py` populates
 representative corpora (Project Gutenberg + Wikipedia) into a gitignored
 `raw/`/`wiki/` you can point `build` at.
 
+### Browse it as a web site
+
+Turn a built graph into a static, zero-dependency browse site — one page per
+entity, centred on perspectives (stance/sentiment, verbatim quote, source, and
+the judge verdicts behind each claim):
+
+```bash
+idchkg site out/graph.db -o site/     # works on graph.db or graph.json
+```
+
+`-o/--out` sets the output directory (default: `site`). The result is plain
+pre-rendered HTML + CSS + a little vanilla JS, so you can just open it:
+
+```bash
+open site/index.html                  # macOS; or double-click the file
+python -m http.server -d site         # or serve it at http://localhost:8000
+```
+
 ### As a library
 
 ```python
