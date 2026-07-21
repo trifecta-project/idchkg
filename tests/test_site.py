@@ -43,6 +43,41 @@ def test_build_site_writes_pages(tmp_path):
     index = (out / "index.html").read_text(encoding="utf-8")
     assert "Browse the knowledge graph" in index
     assert "entity/ent-coffee--beverage.html" in index
+    # A single-sense corpus has no polysemous concepts to highlight.
+    assert "<h2>Most senses</h2>" not in index
+    assert "<h2>Most mentioned</h2>" not in index
+
+
+def test_most_senses_section_leads_with_polysemous_entities(tmp_path):
+    # A label with two senses (coffee: beverage + plant) is the polysemy the
+    # "Most senses" section is meant to surface; single-sense labels are absent.
+    store = GraphStore(tmp_path / "g.db", mode="build")
+    bev = Entity(id="ent-coffee--beverage", label="coffee", sense="beverage", mention_count=6)
+    plant = Entity(id="ent-coffee--plant", label="coffee", sense="plant", mention_count=9)
+    society = Entity(id="ent-society", label="society", mention_count=2)
+    store.add_document(Document(id="doc", text="Coffee.", title="Coffee"))
+    store.add_claim(
+        Claim("coffee", "grows-in", "society",
+              perspective=Perspective("writers", "asserts", "neutral"),
+              provenance=Provenance("doc", "doc#c0", "coffee", "mock")),
+        plant, society)
+    store.finalize_entities([bev, plant, society])
+    store.close()
+
+    store = GraphStore(tmp_path / "g.db", mode="query")
+    out = build_site(store, tmp_path / "site")
+    store.close()
+
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert "<h2>Most senses</h2>" in index
+    assert "<h2>Most mentioned</h2>" not in index
+
+    # The "Most senses" section links both coffee senses; society (single sense)
+    # is not in it (it still appears in the "All entities" list below).
+    head = index.split("<h2>Most senses</h2>")[1].split("<h2>All entities</h2>")[0]
+    assert "entity/ent-coffee--beverage.html" in head
+    assert "entity/ent-coffee--plant.html" in head
+    assert "ent-society.html" not in head
 
 
 def test_entity_page_groups_perspectives_and_escapes(tmp_path):
@@ -86,6 +121,43 @@ def test_document_page_and_provenance_link(tmp_path):
     # The claim's source on the entity page links back to that document.
     entity = (site / "entity" / "ent-coffee--beverage.html").read_text(encoding="utf-8")
     assert 'class="src-doc" href="../doc/doc.html"' in entity
+
+
+def test_over_long_entity_is_skipped_and_logged(tmp_path):
+    # A hallucinated, sentence-length label (extraction error) would produce a
+    # filename past the filesystem limit. The build must not crash: skip its
+    # page and record it in skipped_entities.log instead.
+    long_slug = "x" * 1000
+    store = GraphStore(tmp_path / "g.db", mode="build")
+    good = Entity(id="ent-coffee--beverage", label="coffee", sense="beverage", mention_count=3)
+    bad = Entity(id=f"ent-{long_slug}", label="a whole hallucinated sentence " * 30,
+                 sense="", mention_count=1)
+    store.add_document(Document(id="doc", text="Coffee.", title="Coffee"))
+    store.add_claim(
+        Claim("coffee", "is", "coffee",
+              perspective=Perspective("writers", "asserts", "neutral"),
+              provenance=Provenance("doc", "doc#c0", "coffee", "mock")),
+        good, good)
+    store.finalize_entities([good, bad])
+    store.close()
+
+    store = GraphStore(tmp_path / "g.db", mode="query")
+    out = build_site(store, tmp_path / "site")  # must not raise
+    store.close()
+
+    # The good entity's page exists; the bad one's was never written.
+    # (Don't stat the over-long path directly — that itself raises OSError.)
+    assert (out / "entity" / "ent-coffee--beverage.html").exists()
+    assert not any(long_slug in p.name for p in (out / "entity").iterdir())
+
+    # The skip is recorded in the error log with the offending id.
+    log = (out / "skipped_entities.log").read_text(encoding="utf-8")
+    assert f"ent-{long_slug}" in log
+
+    # The good entity still lists on the index; the bad one is absent.
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert "entity/ent-coffee--beverage.html" in index
+    assert f"ent-{long_slug}.html" not in index
 
 
 def test_timeline_page(tmp_path):

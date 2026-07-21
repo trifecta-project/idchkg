@@ -16,13 +16,30 @@ from __future__ import annotations
 
 import html
 import json
+import logging
+from collections import Counter
 from pathlib import Path
+
+from idchkg._world_svg import COUNTRIES_SVG
+
+logger = logging.getLogger(__name__)
+
+# Single-component filename limit on common filesystems (bytes). Entity page
+# files are named ``{entity.id}.html``; an over-long id (a hallucinated,
+# sentence-length label slugified in resolve.py) blows past this and makes
+# Path.write_text raise. Such entities are extraction errors — we skip them.
+_MAX_FILENAME_BYTES = 255
 
 # ------------------------------------------------------------------ helpers
 
 
 def _esc(value) -> str:
     return html.escape("" if value is None else str(value))
+
+
+def _filename_too_long(entity) -> bool:
+    """True when the entity's page filename would exceed the filesystem limit."""
+    return len(f"{entity.id}.html".encode("utf-8")) > _MAX_FILENAME_BYTES
 
 
 def _key(label: str, sense: str) -> tuple[str, str]:
@@ -102,7 +119,7 @@ def _page(title: str, body: str, depth: int) -> str:
 <body>
 <header class="site"><div class="wrap"><a class="brand" href="{up}index.html">idchkg</a>
 <span class="tagline">an unflattened knowledge graph</span>
-<nav><a href="{up}index.html">Browse</a> <a href="{up}timeline.html">Timeline</a></nav></div></header>
+<nav><a href="{up}index.html">Browse</a> <a href="{up}timeline.html">Timeline</a> <a href="{up}heatmap.html">Heatmap</a> <a href="{up}geomap.html">Map</a></nav></div></header>
 <main class="wrap">
 {body}
 </main>
@@ -124,16 +141,24 @@ def _render_index(graph, entities, by_key, documents) -> str:
         f"</ul>"
     )
 
-    tail = graph.long_tail()
-    head_keys = {_key(lbl, sense) for lbl, sense, _ in tail["head"]}
+    # Lead with the polysemous concepts (Challenge 1: identity) — labels held
+    # apart into multiple senses, most senses first. Single-sense entities stay
+    # in the full "All entities" list below.
+    sense_counts = Counter(e.label.casefold() for e in entities)
+    multi = [e for e in entities if sense_counts[e.label.casefold()] >= 2]
+    multi.sort(key=lambda e: (-sense_counts[e.label.casefold()], e.label.casefold(), -e.mention_count))
     head_items = "".join(
         f'<li><a href="entity/{_esc(e.id)}.html">{_esc(e.label)}'
         f'{f" <em>({_esc(e.sense)})</em>" if e.sense else ""}</a>'
         f' <span class="count">{e.mention_count}</span></li>'
-        for e in sorted(entities, key=lambda e: -e.mention_count)
-        if _key(e.label, e.sense) in head_keys
+        for e in multi
     )
-    head = f'<section><h2>Most mentioned</h2><ul class="entity-list">{head_items}</ul></section>' if head_items else ""
+    head = (
+        '<section><h2>Most senses</h2>'
+        '<p class="muted">Concepts one word holds apart into distinct senses — '
+        'the same label, kept un-flattened. Those with the most senses come first.</p>'
+        f'<ul class="entity-list">{head_items}</ul></section>'
+    ) if head_items else ""
 
     # Full, searchable index (data-label drives the JS filter).
     index_items = "".join(
@@ -288,6 +313,276 @@ def _render_entity(graph, entity, by_key) -> str:
     return _page(f"{entity.label} — idchkg", body, depth=1)
 
 
+def _render_heatmap(graph, entities, by_key) -> str:
+    """A heatmap page: entities as tiles coloured by mention frequency."""
+    if not entities:
+        return _page("Heatmap — idchkg", '<p class="muted">No entities.</p>', depth=0)
+
+    max_count = max(e.mention_count for e in entities)
+    min_count = min(e.mention_count for e in entities)
+    span = max(max_count - min_count, 1)
+
+    tiles = []
+    for e in sorted(entities, key=lambda e: -e.mention_count):
+        t = (e.mention_count - min_count) / span  # 0..1, 1 = hottest
+        sense = f' <em>({_esc(e.sense)})</em>' if e.sense else ""
+        tiles.append(
+            f'<a class="hm-tile" href="entity/{_esc(e.id)}.html" '
+            f'style="--heat:{t:.3f}" title="{_esc(e.label)}: {e.mention_count} mentions">'
+            f'<span class="hm-label">{_esc(e.label)}{sense}</span>'
+            f'<span class="hm-count">{e.mention_count}</span></a>'
+        )
+
+    legend = (
+        '<div class="hm-legend">'
+        f'<span class="hm-lo">{min_count}</span>'
+        '<span class="hm-bar"></span>'
+        f'<span class="hm-hi">{max_count}</span>'
+        '<span class="muted" style="margin-left:8px">mentions</span>'
+        '</div>'
+    )
+
+    body = (
+        '<section class="intro"><h1>Entity heatmap</h1>'
+        '<p>Entities sized and coloured by how often they appear in the corpus — '
+        'brighter tiles are mentioned more frequently.</p></section>'
+        f'{legend}<div class="hm-grid">{"".join(tiles)}</div>'
+    )
+    return _page("Heatmap — idchkg", body, depth=0)
+
+
+# Common place names → (lat, lon).  Equirectangular projection: x = lon, y = -lat.
+_GEOCODE: dict[str, tuple[float, float]] = {
+    "amsterdam": (52.37, 4.90), "athens": (37.98, 23.73), "baghdad": (33.31, 44.37),
+    "bangkok": (13.76, 100.50), "barcelona": (41.39, 2.17), "beijing": (39.90, 116.40),
+    "berlin": (52.52, 13.41), "bogota": (4.71, -74.07), "boston": (42.36, -71.06),
+    "brussels": (50.85, 4.35), "budapest": (47.50, 19.04), "buenos aires": (-34.60, -58.38),
+    "cairo": (30.04, 31.24), "cape town": (-33.93, 18.42), "chicago": (41.88, -87.63),
+    "copenhagen": (55.68, 12.57), "dakar": (14.72, -17.47), "damascus": (33.51, 36.29),
+    "delhi": (28.61, 77.21), "new delhi": (28.61, 77.21), "dubai": (25.20, 55.27),
+    "dublin": (53.35, -6.26), "edinburgh": (55.95, -3.19), "florence": (43.77, 11.25),
+    "geneva": (46.20, 6.14), "havana": (23.11, -82.37), "helsinki": (60.17, 24.94),
+    "hong kong": (22.32, 114.17), "istanbul": (41.01, 28.98), "jakarta": (-6.21, 106.85),
+    "jerusalem": (31.77, 35.23), "johannesburg": (-26.20, 28.05),
+    "kabul": (34.53, 69.17), "karachi": (24.86, 67.01), "kathmandu": (27.72, 85.32),
+    "kyiv": (50.45, 30.52), "kiev": (50.45, 30.52), "kuala lumpur": (3.14, 101.69),
+    "lagos": (6.52, 3.38), "lima": (-12.05, -77.04), "lisbon": (38.72, -9.14),
+    "london": (51.51, -0.13), "los angeles": (34.05, -118.24), "madrid": (40.42, -3.70),
+    "manila": (14.60, 120.98), "mecca": (21.39, 39.86), "medina": (24.47, 39.61),
+    "melbourne": (-37.81, 144.96), "mexico city": (19.43, -99.13), "milan": (45.46, 9.19),
+    "moscow": (55.76, 37.62), "mumbai": (19.08, 72.88), "munich": (48.14, 11.58),
+    "nairobi": (-1.29, 36.82), "new york": (40.71, -74.01), "new york city": (40.71, -74.01),
+    "osaka": (34.69, 135.50), "oslo": (59.91, 10.75), "ottawa": (45.42, -75.70),
+    "paris": (48.86, 2.35), "prague": (50.08, 14.44), "quito": (-0.18, -78.47),
+    "rabat": (34.02, -6.84), "reykjavik": (64.15, -21.94), "rio de janeiro": (-22.91, -43.17),
+    "riyadh": (24.69, 46.72), "rome": (41.90, 12.50), "san francisco": (37.77, -122.42),
+    "santiago": (-33.45, -70.67), "são paulo": (-23.55, -46.63), "sao paulo": (-23.55, -46.63),
+    "seoul": (37.57, 126.98), "shanghai": (31.23, 121.47), "singapore": (1.35, 103.82),
+    "stockholm": (59.33, 18.07), "sydney": (-33.87, 151.21), "taipei": (25.03, 121.57),
+    "tehran": (35.69, 51.39), "tokyo": (35.68, 139.69), "toronto": (43.65, -79.38),
+    "tunis": (36.81, 10.18), "venice": (45.44, 12.32), "vienna": (48.21, 16.37),
+    "warsaw": (52.23, 21.01), "washington": (38.91, -77.04), "washington dc": (38.91, -77.04),
+    "zurich": (47.38, 8.54),
+    # countries / regions → approximate centroids
+    "afghanistan": (33.0, 65.0), "algeria": (28.0, 3.0), "argentina": (-34.0, -64.0),
+    "australia": (-25.0, 134.0), "austria": (47.3, 13.3), "bangladesh": (24.0, 90.0),
+    "belgium": (50.5, 4.0), "bolivia": (-17.0, -65.0), "brazil": (-10.0, -55.0),
+    "cambodia": (13.0, 105.0), "cameroon": (6.0, 12.0), "canada": (56.0, -106.0),
+    "chile": (-30.0, -71.0), "china": (35.0, 105.0), "colombia": (4.0, -72.0),
+    "congo": (-1.0, 15.0), "costa rica": (10.0, -84.0), "croatia": (45.2, 15.5),
+    "cuba": (22.0, -80.0), "czech republic": (49.8, 15.5), "czechia": (49.8, 15.5),
+    "denmark": (56.0, 10.0), "ecuador": (-2.0, -77.5), "egypt": (27.0, 30.0),
+    "england": (52.0, -1.0), "ethiopia": (8.0, 38.0), "finland": (64.0, 26.0),
+    "france": (46.0, 2.0), "germany": (51.0, 10.0), "ghana": (8.0, -2.0),
+    "greece": (39.0, 22.0), "guatemala": (15.5, -90.3), "hungary": (47.0, 20.0),
+    "iceland": (65.0, -18.0), "india": (21.0, 78.0), "indonesia": (-5.0, 120.0),
+    "iran": (32.0, 53.0), "iraq": (33.0, 44.0), "ireland": (53.0, -8.0),
+    "israel": (31.0, 35.0), "italy": (42.5, 12.5), "jamaica": (18.1, -77.3),
+    "japan": (36.0, 138.0), "jordan": (31.0, 36.0), "kazakhstan": (48.0, 68.0),
+    "kenya": (1.0, 38.0), "korea": (36.0, 128.0), "south korea": (36.0, 128.0),
+    "north korea": (40.0, 127.0), "kuwait": (29.5, 47.8), "laos": (18.0, 105.0),
+    "lebanon": (33.9, 35.9), "libya": (27.0, 17.0), "malaysia": (4.0, 109.0),
+    "mali": (17.0, -4.0), "mexico": (23.0, -102.0), "mongolia": (46.0, 105.0),
+    "morocco": (32.0, -5.0), "mozambique": (-18.3, 35.0), "myanmar": (22.0, 98.0),
+    "nepal": (28.0, 84.0), "netherlands": (52.1, 5.3), "holland": (52.1, 5.3),
+    "new zealand": (-42.0, 174.0), "nigeria": (10.0, 8.0), "norway": (62.0, 10.0),
+    "pakistan": (30.0, 70.0), "palestine": (31.9, 35.2), "panama": (9.0, -80.0),
+    "paraguay": (-23.0, -58.0), "peru": (-10.0, -76.0), "philippines": (13.0, 122.0),
+    "poland": (52.0, 20.0), "portugal": (39.5, -8.0), "qatar": (25.3, 51.2),
+    "romania": (46.0, 25.0), "russia": (60.0, 100.0), "saudi arabia": (24.0, 45.0),
+    "scotland": (57.0, -4.0), "senegal": (14.5, -14.5), "serbia": (44.0, 21.0),
+    "south africa": (-30.0, 25.0), "spain": (40.0, -4.0), "sri lanka": (7.0, 81.0),
+    "sudan": (15.0, 30.0), "sweden": (62.0, 15.0), "switzerland": (47.0, 8.0),
+    "syria": (35.0, 38.0), "taiwan": (24.0, 121.0), "tanzania": (-6.0, 35.0),
+    "thailand": (15.0, 100.0), "tunisia": (34.0, 9.0), "turkey": (39.0, 35.0),
+    "turkiye": (39.0, 35.0), "uganda": (1.0, 32.0), "ukraine": (49.0, 32.0),
+    "united arab emirates": (24.0, 54.0), "uae": (24.0, 54.0),
+    "united kingdom": (54.0, -2.0), "uk": (54.0, -2.0), "britain": (54.0, -2.0),
+    "great britain": (54.0, -2.0),
+    "united states": (39.0, -98.0), "usa": (39.0, -98.0),
+    "united states of america": (39.0, -98.0), "america": (39.0, -98.0),
+    "uruguay": (-33.0, -56.0), "uzbekistan": (41.0, 64.0),
+    "venezuela": (8.0, -66.0), "vietnam": (16.0, 108.0), "wales": (52.1, -3.6),
+    "yemen": (15.0, 48.0), "zambia": (-15.0, 28.0), "zimbabwe": (-20.0, 30.0),
+    # major historical / cultural places
+    "constantinople": (41.01, 28.98), "byzantium": (41.01, 28.98),
+    "persia": (32.0, 53.0), "ottoman empire": (39.0, 35.0), "mesopotamia": (33.0, 44.0),
+    "anatolia": (39.0, 32.0), "levant": (34.0, 36.0), "maghreb": (33.0, 2.0),
+    "sahara": (23.0, 12.0), "siberia": (60.0, 105.0), "scandinavia": (62.0, 15.0),
+    "balkans": (42.0, 21.0), "caucasus": (42.0, 44.0), "tibet": (32.0, 88.0),
+    "java": (-7.6, 110.4), "sumatra": (0.0, 102.0), "borneo": (1.0, 114.0),
+    "sicily": (37.5, 14.0), "crete": (35.2, 24.9), "sardinia": (40.0, 9.0),
+    "corsica": (42.2, 9.1), "ceylon": (7.0, 81.0), "formosa": (24.0, 121.0),
+    "east indies": (-5.0, 120.0), "west indies": (17.0, -65.0),
+    "caribbean": (15.0, -75.0), "mediterranean": (35.0, 18.0),
+    "middle east": (29.0, 41.0), "southeast asia": (10.0, 107.0),
+    "east africa": (-3.0, 37.0), "west africa": (10.0, -5.0), "north africa": (30.0, 10.0),
+    "central america": (13.0, -85.0), "south america": (-15.0, -60.0),
+    "north america": (45.0, -100.0), "central asia": (42.0, 65.0),
+    "east asia": (35.0, 115.0), "south asia": (22.0, 78.0),
+    "europe": (50.0, 10.0), "africa": (2.0, 22.0), "asia": (34.0, 100.0),
+    "oceania": (-22.0, 140.0), "pacific": (0.0, -160.0), "atlantic": (25.0, -40.0),
+    "arctic": (80.0, 0.0), "antarctica": (-80.0, 0.0),
+    # rivers / landmarks
+    "nile": (25.0, 32.0), "amazon": (-3.0, -60.0), "ganges": (25.0, 83.0),
+    "danube": (47.0, 19.0), "rhine": (50.0, 7.0), "thames": (51.5, -0.1),
+    "mississippi": (32.0, -91.0), "yangtze": (30.0, 112.0), "mekong": (16.0, 105.0),
+    "alps": (46.5, 10.0), "himalayas": (28.0, 84.0), "andes": (-20.0, -66.0),
+    "sahel": (14.0, 0.0),
+}
+
+
+def _geocode_entity(entity) -> tuple[float, float] | None:
+    """Try to geocode an entity by its label (and aliases) against the built-in table."""
+    for name in [entity.label] + getattr(entity, "aliases", []):
+        coords = _GEOCODE.get(name.strip().casefold())
+        if coords is not None:
+            return coords
+    return None
+
+
+def _render_geomap(graph, entities, by_key) -> str:
+    """A geographical heatmap: place entities plotted on a world map, coloured by frequency."""
+    places = [e for e in entities if e.type == "place"]
+    if not places:
+        return _page(
+            "Map — idchkg",
+            '<section class="intro"><h1>Geographical heatmap</h1>'
+            '<p class="muted">No place entities found in the graph.</p></section>',
+            depth=0,
+        )
+
+    # Geocode what we can.
+    resolved: list[tuple] = []  # (entity, lat, lon)
+    unresolved: list = []
+    for e in places:
+        coords = _geocode_entity(e)
+        if coords:
+            resolved.append((e, *coords))
+        else:
+            unresolved.append(e)
+
+    max_count = max(e.mention_count for e in places)
+    min_count = min(e.mention_count for e in places)
+    span = max(max_count - min_count, 1)
+
+    # Equirectangular projection: x = lon+180, y = 90-lat, mapped to 0..800 x 0..400
+    W, H = 800, 400
+
+    def project(lat: float, lon: float) -> tuple[float, float]:
+        return ((lon + 180) / 360 * W, (90 - lat) / 180 * H)
+
+    # Build SVG markers.
+    markers = []
+    for e, lat, lon in sorted(resolved, key=lambda t: t[0].mention_count):
+        x, y = project(lat, lon)
+        t = (e.mention_count - min_count) / span
+        # Radius proportional to sqrt of count for area-proportional sizing.
+        r = 4 + 14 * (t ** 0.5)
+        markers.append(
+            f'<a href="entity/{_esc(e.id)}.html">'
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}" '
+            f'fill-opacity=".75" class="geo-dot" style="--heat:{t:.3f}">'
+            f'<title>{_esc(e.label)}: {e.mention_count} mentions</title>'
+            f'</circle></a>'
+        )
+
+    # Minimal world coastline outline (simplified Natural Earth).
+    # We use a very simple, recognisable outline as a background.
+    map_bg = (
+        '<rect width="800" height="400" fill="var(--geo-sea)" rx="6"/>'
+        # Simple continent outlines as rounded rectangles for recognisability
+        # (a real SVG path would be huge; this gives the spatial context needed)
+        # Instead we draw a graticule (grid lines) that orients the viewer.
+    )
+    graticule = []
+    for lon in range(-180, 181, 30):
+        x, _ = project(0, lon)
+        graticule.append(f'<line x1="{x:.0f}" y1="0" x2="{x:.0f}" y2="{H}" />')
+    for lat in range(-90, 91, 30):
+        _, y = project(lat, 0)
+        graticule.append(f'<line x1="0" y1="{y:.0f}" x2="{W}" y2="{y:.0f}" />')
+    # Equator and prime meridian slightly emphasised via class
+    eq_y = H / 2
+    pm_x = W / 2
+    graticule_svg = (
+        f'<g class="geo-grid" stroke="var(--geo-grid)" stroke-width=".5" stroke-dasharray="4 4">'
+        f'{"".join(graticule)}</g>'
+        f'<line x1="0" y1="{eq_y}" x2="{W}" y2="{eq_y}" stroke="var(--geo-grid)" stroke-width="1" opacity=".6"/>'
+        f'<line x1="{pm_x}" y1="0" x2="{pm_x}" y2="{H}" stroke="var(--geo-grid)" stroke-width="1" opacity=".6"/>'
+    )
+
+    # Axis labels (a few lat/lon labels for orientation).
+    axis_labels = []
+    for lon in range(-180, 181, 60):
+        x, _ = project(0, lon)
+        axis_labels.append(f'<text x="{x:.0f}" y="{H - 4}" class="geo-axis">{lon}°</text>')
+    for lat in range(-60, 91, 30):
+        _, y = project(lat, 0)
+        axis_labels.append(f'<text x="4" y="{y:.0f}" class="geo-axis">{lat}°</text>')
+
+    svg = (
+        f'<svg class="geo-svg" viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg">'
+        f'{map_bg}'
+        f'<g class="geo-land">{COUNTRIES_SVG}</g>'
+        f'{graticule_svg}'
+        f'{"".join(axis_labels)}'
+        f'{"".join(markers)}'
+        '</svg>'
+    )
+
+    legend = (
+        '<div class="hm-legend">'
+        f'<span class="hm-lo">{min_count}</span>'
+        '<span class="hm-bar"></span>'
+        f'<span class="hm-hi">{max_count}</span>'
+        '<span class="muted" style="margin-left:8px">mentions</span>'
+        '</div>'
+    )
+
+    unresolved_html = ""
+    if unresolved:
+        items = "".join(
+            f'<li><a href="entity/{_esc(e.id)}.html">{_esc(e.label)}'
+            f'{f" <em>({_esc(e.sense)})</em>" if e.sense else ""}</a>'
+            f' <span class="count">{e.mention_count}</span></li>'
+            for e in sorted(unresolved, key=lambda e: -e.mention_count)
+        )
+        unresolved_html = (
+            '<section><h2>Unmapped places</h2>'
+            '<p class="muted">Place entities not matched to known coordinates.</p>'
+            f'<ul class="entity-list">{items}</ul></section>'
+        )
+
+    body = (
+        '<section class="intro"><h1>Geographical heatmap</h1>'
+        f'<p>Location entities plotted on a world map — larger, warmer circles mean more mentions. '
+        f'{len(resolved)} of {len(places)} place entities mapped.</p></section>'
+        f'{legend}{svg}{unresolved_html}'
+    )
+    return _page("Map — idchkg", body, depth=0)
+
+
 # -------------------------------------------------------------------- build
 
 
@@ -297,13 +592,38 @@ def build_site(graph, out_dir: str | Path) -> Path:
     (out / "entity").mkdir(parents=True, exist_ok=True)
     (out / "doc").mkdir(parents=True, exist_ok=True)
 
-    entities = sorted(graph.entities, key=lambda e: (e.label.casefold(), e.sense))
+    all_entities = sorted(graph.entities, key=lambda e: (e.label.casefold(), e.sense))
+    # Over-long ids (hallucinated labels from the extraction step) produce
+    # filenames past the filesystem limit; skip their pages and log them so the
+    # rest of the site still builds. Cross-links to them fall back to plain text
+    # because they are absent from by_key.
+    entities = [e for e in all_entities if not _filename_too_long(e)]
+    skipped = [e for e in all_entities if _filename_too_long(e)]
     by_key = {_key(e.label, e.sense): e for e in entities}
     documents = sorted(graph.documents(), key=lambda d: (d.title or d.id).casefold())
+
+    if skipped:
+        log_path = out / "skipped_entities.log"
+        lines = [
+            "# Entities skipped during site generation (over-long names — likely "
+            "extraction errors).",
+            "# Fields: mention_count\tsense\tid\tlabel",
+        ]
+        lines += [
+            f"{e.mention_count}\t{e.sense}\t{e.id}\t{e.label}" for e in skipped
+        ]
+        log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        logger.warning(
+            "Skipped %d entity page(s) with over-long names; see %s",
+            len(skipped),
+            log_path,
+        )
 
     (out / "style.css").write_text(_CSS, encoding="utf-8")
     (out / "index.html").write_text(_render_index(graph, entities, by_key, documents), encoding="utf-8")
     (out / "timeline.html").write_text(_render_timeline(graph, by_key), encoding="utf-8")
+    (out / "heatmap.html").write_text(_render_heatmap(graph, entities, by_key), encoding="utf-8")
+    (out / "geomap.html").write_text(_render_geomap(graph, entities, by_key), encoding="utf-8")
     for entity in entities:
         (out / "entity" / f"{entity.id}.html").write_text(
             _render_entity(graph, entity, by_key), encoding="utf-8"
@@ -458,5 +778,30 @@ ul.verdicts .score{color:var(--accent)}
 .conflict{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:.6em 0}
 ul.conflict-claims{list-style:none;padding:0;margin:.3em 0 0}
 ul.conflict-claims li{padding:.2em 0}
+/* geographical heatmap */
+:root{--geo-sea:#e8eff4;--geo-grid:#c0cdd8}
+.geo-land path{fill:#d6dcc4;stroke:#fff;stroke-width:.5;stroke-linejoin:round}
+.geo-svg{width:100%;max-width:820px;border-radius:8px;border:1px solid var(--line);margin:.6em 0}
+.geo-dot{fill:color-mix(in srgb,#b4472f calc(var(--heat)*100%),#e8c87a);
+  stroke:#fff;stroke-width:1;cursor:pointer;transition:r .15s}
+.geo-dot:hover{r:20;fill-opacity:1}
+.geo-axis{font-size:9px;fill:var(--muted);dominant-baseline:middle}
+/* heatmap */
+.hm-legend{display:flex;align-items:center;gap:6px;margin:1.2em 0 .8em;font-size:.82rem;color:var(--muted)}
+.hm-bar{display:inline-block;width:120px;height:12px;border-radius:6px;
+  background:linear-gradient(90deg,#e8e4df,#f0c26b,#e07340,#b4472f)}
+.hm-lo,.hm-hi{font-weight:600;color:var(--ink)}
+.hm-grid{display:flex;flex-wrap:wrap;gap:6px}
+.hm-tile{display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:10px 14px;border-radius:8px;text-decoration:none;
+  min-width:80px;min-height:56px;
+  background:color-mix(in srgb,#b4472f calc(var(--heat)*100%),#e8e4df);
+  color:color-mix(in srgb,#fff calc(var(--heat)*100%),var(--ink));
+  border:1px solid color-mix(in srgb,#b4472f calc(var(--heat)*60%),var(--line));
+  transition:transform .12s}
+.hm-tile:hover{transform:scale(1.06);text-decoration:none}
+.hm-label{font-size:.82rem;font-weight:600;text-align:center;line-height:1.2}
+.hm-label em{font-style:normal;font-weight:400;font-size:.72rem;opacity:.85}
+.hm-count{font-size:.72rem;margin-top:2px;opacity:.8}
 @media(max-width:600px){ul.entity-list{columns:1}html{font-size:16px}}
 """

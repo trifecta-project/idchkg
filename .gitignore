@@ -8,6 +8,9 @@ out/
 site/
 *.db
 
+# Cached Natural Earth GeoJSON (large; scripts/generate_world_svg.py fetches it)
+scripts/*.geojson
+
 # Fetched corpora (large; run examples/corpora/fetch.py to populate)
 examples/corpora/**/raw/
 examples/corpora/**/wiki/
