@@ -123,6 +123,33 @@ def test_document_page_and_provenance_link(tmp_path):
     assert 'class="src-doc" href="../doc/doc.html"' in entity
 
 
+def test_branding_assets_and_funding_statement(tmp_path):
+    store = _store(tmp_path)
+    out = build_site(store, tmp_path / "site")
+    store.close()
+
+    # Brand logos are written as assets and referenced by the page chrome.
+    assert (out / "assets" / "trifecta-logo.png").exists()
+    assert (out / "assets" / "erc-logo.png").exists()
+    for f in ("assets/trifecta-logo.png", "assets/erc-logo.png"):
+        assert (out / f).read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+    index = (out / "index.html").read_text(encoding="utf-8")
+    # Header: TRIFECTA logo + tagline.
+    assert 'src="assets/trifecta-logo.png"' in index
+    assert "Better Knowledge Graphs for Humanities Research" in index
+    # Footer: ERC logo + the required EU funding statement.
+    assert 'src="assets/erc-logo.png"' in index
+    assert "Funded by the European Union under grant agreement 101088548" in index
+    assert "can be held responsible for them." in index
+
+    # Deeper pages reference the same assets via the ../ depth prefix.
+    entity = (out / "entity" / "ent-coffee--beverage.html").read_text(encoding="utf-8")
+    assert 'src="../assets/trifecta-logo.png"' in entity
+    assert 'src="../assets/erc-logo.png"' in entity
+    assert "grant agreement 101088548" in entity
+
+
 def test_over_long_entity_is_skipped_and_logged(tmp_path):
     # A hallucinated, sentence-length label (extraction error) would produce a
     # filename past the filesystem limit. The build must not crash: skip its
