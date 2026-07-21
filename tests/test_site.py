@@ -60,6 +60,58 @@ def test_source_link_points_to_the_quote_paragraph(tmp_path):
     assert 'class="src-doc" href="../doc/doc.html#p2"' in entity
 
 
+def test_overview_stat_tiles_and_charts(tmp_path):
+    store = GraphStore(tmp_path / "g.db", mode="build")
+    coffee = Entity(id="ent-coffee--beverage", label="coffee", sense="beverage", mention_count=5,
+                    dbpedia={"uri": "http://dbpedia.org/resource/Coffee", "score": 0.99,
+                             "surfaceForm": "coffee",
+                             "types": ["http://dbpedia.org/ontology/Beverage",
+                                       "http://dbpedia.org/ontology/Food"], "dbo_type": []})
+    society = Entity(id="ent-society", label="society", mention_count=1)  # hapax
+    store.add_document(Document(id="doc", text="Coffee refined society."))
+    store.add_claim(
+        Claim("coffee", "refines", "society",
+              perspective=Perspective("writers", "asserts", "positive"),
+              provenance=Provenance("doc", "doc#c0", "coffee")),
+        coffee, society)
+    store.finalize_entities([coffee, society])
+    store.close()
+
+    store = GraphStore(tmp_path / "g.db", mode="query")
+    out = build_site(store, tmp_path / "site")
+    store.close()
+    index = (out / "index.html").read_text(encoding="utf-8")
+
+    # Stat-tile band with headline numbers, incl. DBpedia coverage.
+    assert "<h2>At a glance</h2>" in index
+    assert 'class="stat-num">50%</span><span class="stat-label">DBpedia-linked' in index
+    # 'What the corpus is about' chart is driven by entity senses.
+    assert "What the corpus is about" in index
+    assert ">beverage</span>" in index                   # coffee's sense
+    # Long-tail chart + hapax note (1 of 2 entities appears once).
+    assert "Mention frequency" in index and "appear exactly once" in index
+    # Sentiment diverging bar with a legend entry.
+    assert "Positive 1" in index
+
+
+def test_overview_omits_senses_chart_when_no_senses(tmp_path):
+    # Entities without a sense -> the 'What the corpus is about' chart is skipped,
+    # but the band and the always-available charts still render.
+    store = GraphStore(tmp_path / "g.db", mode="build")
+    a = Entity(id="ent-a", label="alpha", mention_count=2)   # no sense
+    b = Entity(id="ent-b", label="beta", mention_count=1)
+    store.add_document(Document(id="d", text="Alpha and beta."))
+    store.finalize_entities([a, b])
+    store.close()
+    store = GraphStore(tmp_path / "g.db", mode="query")
+    out = build_site(store, tmp_path / "site")
+    store.close()
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert "<h2>At a glance</h2>" in index
+    assert "What the corpus is about" not in index      # no senses to chart
+    assert "Mention frequency" in index                  # long tail always shown
+
+
 def test_geomap_is_zoomable(tmp_path):
     store = GraphStore(tmp_path / "g.db", mode="build")
     brazil = Entity(id="ent-brazil", label="Brazil", type="place", mention_count=5)

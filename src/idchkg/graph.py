@@ -134,6 +134,20 @@ class KnowledgeGraph:
     def claim_count(self) -> int:
         return len(self._claims)
 
+    def perspective_stats(self) -> dict:
+        """Corpus-wide stance/sentiment tallies + distinct-viewpoint count — the
+        Perspective dimension, for the overview charts."""
+        from collections import Counter
+
+        stance: Counter = Counter()
+        sentiment: Counter = Counter()
+        viewpoints = set()
+        for c in self._claims.values():
+            stance[c.perspective.stance] += 1
+            sentiment[c.perspective.sentiment] += 1
+            viewpoints.add(c.perspective.viewpoint)
+        return {"stance": dict(stance), "sentiment": dict(sentiment), "viewpoints": len(viewpoints)}
+
     def documents(self) -> list[Document]:
         return list(self._documents.values())
 

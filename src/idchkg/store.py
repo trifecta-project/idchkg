@@ -558,6 +558,14 @@ class GraphStore:
     def claim_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
 
+    def perspective_stats(self) -> dict:
+        """Corpus-wide stance/sentiment tallies + distinct-viewpoint count, via
+        SQL GROUP BY (never materialises the claim set)."""
+        stance = dict(self.conn.execute("SELECT stance, COUNT(*) FROM claims GROUP BY stance"))
+        sentiment = dict(self.conn.execute("SELECT sentiment, COUNT(*) FROM claims GROUP BY sentiment"))
+        viewpoints = self.conn.execute("SELECT COUNT(DISTINCT viewpoint) FROM claims").fetchone()[0]
+        return {"stance": stance, "sentiment": sentiment, "viewpoints": viewpoints}
+
     def documents(self) -> list[Document]:
         return [
             Document(id=r["id"], text=r["text"] or "", title=r["title"] or "",

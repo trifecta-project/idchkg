@@ -182,17 +182,131 @@ def _page(title: str, body: str, depth: int) -> str:
 """
 
 
+# ----------------------------------------------------------- overview charts
+# All charts are plain HTML/CSS (zero-dep, file://-safe). Magnitude charts use a
+# single brand hue; sentiment is a diverging polarity bar (its true shape), with
+# direct labels + a legend so identity is never colour-alone.
+
+# Sentiment read as diverging polarity: negative ← neutral → positive (+ambivalent).
+_SENT_ORDER = ["negative", "neutral", "positive", "ambivalent"]
+_SENT_COLOR = {"negative": "#b4472f", "neutral": "#c9c5bd", "positive": "#2f8f63", "ambivalent": "#6a4a9c"}
+
+
+def _stat_tiles(items) -> str:
+    """A KPI row of (value, label) tiles — headline numbers, no plot."""
+    tiles = "".join(
+        f'<div class="stat-tile"><span class="stat-num">{_esc(v)}</span>'
+        f'<span class="stat-label">{_esc(lbl)}</span></div>'
+        for v, lbl in items
+    )
+    return f'<div class="stat-tiles">{tiles}</div>'
+
+
+def _bar_list(rows, unit: str = "") -> str:
+    """Single-hue horizontal magnitude bars. rows: [(label, value)] — scaled to
+    the max, with a direct value label and a native hover tooltip per row."""
+    if not rows:
+        return ""
+    top = max((v for _, v in rows), default=0) or 1
+    out = []
+    for label, v in rows:
+        tip = f"{label}: {v}{(' ' + unit) if unit else ''}"
+        out.append(
+            f'<div class="barrow" title="{_esc(tip)}">'
+            f'<span class="barlabel">{_esc(label)}</span>'
+            f'<span class="bartrack"><span class="barfill" style="width:{100 * v / top:.1f}%"></span></span>'
+            f'<span class="barval">{v}</span></div>'
+        )
+    return f'<div class="barlist">{"".join(out)}</div>'
+
+
+def _sentiment_bar(sentiment: dict) -> str:
+    """A diverging polarity bar for sentiment, direct-labelled with a legend."""
+    total = sum(sentiment.values())
+    if not total:
+        return ""
+    segs, legend = [], []
+    for key in _SENT_ORDER:
+        v = sentiment.get(key, 0)
+        if not v:
+            continue
+        label = key.capitalize()
+        inner = str(v) if 100 * v / total >= 8 else ""
+        # neutral is a light fill — dark text keeps the value readable on it.
+        ink = "#3a3833" if key == "neutral" else "#fff"
+        segs.append(
+            f'<span class="divseg" style="flex:{v} 0 0;background:{_SENT_COLOR[key]};color:{ink}" '
+            f'title="{_esc(label)}: {v}">{inner}</span>'
+        )
+        legend.append(
+            f'<span class="leg"><span class="swatch" style="background:{_SENT_COLOR[key]}"></span>{_esc(label)} {v}</span>'
+        )
+    return f'<div class="divbar">{"".join(segs)}</div><div class="chart-legend">{"".join(legend)}</div>'
+
+
+def _figure(title: str, body: str, note_html: str = "") -> str:
+    note = f'<figcaption class="fig-note">{note_html}</figcaption>' if note_html else ""
+    return (
+        f'<figure class="chart"><figcaption class="fig-title">{_esc(title)}</figcaption>{body}{note}</figure>'
+    )
+
+
+def _render_overview(graph, entities) -> str:
+    """The index 'At a glance' band: stat tiles + a few insight charts."""
+    n_ent = graph.entity_count()
+    linked = sum(1 for e in entities if getattr(e, "dbpedia", None))
+    pct_linked = round(100 * linked / len(entities)) if entities else 0
+    ps = graph.perspective_stats()
+
+    tiles = _stat_tiles([
+        (graph.document_count(), "documents"),
+        (n_ent, "entities"),
+        (graph.claim_count(), "claims"),
+        (f"{pct_linked}%", "DBpedia-linked"),
+        (ps["viewpoints"], "viewpoints"),
+        (len(graph.conflicts()), "disagreements"),
+    ])
+
+    figures = []
+
+    # 1. What the corpus is about — the senses concepts are used in (Challenge 1).
+    sense_counts: Counter = Counter(e.sense for e in entities if e.sense)
+    if sense_counts:
+        figures.append(_figure(
+            "What the corpus is about",
+            _bar_list(sense_counts.most_common(10), "entities"),
+            "The senses concepts are used in — the corpus's recurring kinds of thing.",
+        ))
+
+    # 2. The long tail (Challenge 3) — mention-frequency buckets.
+    order = ["1 mention", "2–3", "4–10", "11+"]
+    b = dict.fromkeys(order, 0)
+    for e in entities:
+        m = e.mention_count
+        b[order[0] if m <= 1 else order[1] if m <= 3 else order[2] if m <= 10 else order[3]] += 1
+    hapax_note = (
+        f"<b>{round(100 * b[order[0]] / len(entities))}%</b> of entities appear exactly once — the long tail."
+        if entities else ""
+    )
+    figures.append(_figure("Mention frequency", _bar_list([(k, b[k]) for k in order], "entities"), hapax_note))
+
+    # 3. Sentiment (diverging), with the stance skew as a caption.
+    sent_body = _sentiment_bar(ps["sentiment"])
+    if sent_body:
+        st = ps["stance"]
+        st_total = sum(st.values()) or 1
+        note = f"Stance is <b>{round(100 * st.get('asserts', 0) / st_total)}%</b> assertions across {st_total} claims."
+        figures.append(_figure("Sentiment", sent_body, note))
+
+    charts = f'<div class="chart-grid">{"".join(figures)}</div>' if figures else ""
+    return f'<section class="overview"><h2>At a glance</h2>{tiles}{charts}</section>'
+
+
 # -------------------------------------------------------------------- pages
 
 
 def _render_index(graph, entities, by_key, documents) -> str:
-    stats = (
-        f'<ul class="stats">'
-        f'<li><b>{graph.document_count()}</b> documents</li>'
-        f'<li><b>{graph.entity_count()}</b> entities</li>'
-        f'<li><b>{graph.claim_count()}</b> claims</li>'
-        f"</ul>"
-    )
+    overview = _render_overview(graph, entities)
 
     # Lead with the polysemous concepts (Challenge 1: identity) — labels held
     # apart into multiple senses, most senses first. Single-sense entities stay
@@ -243,8 +357,8 @@ def _render_index(graph, entities, by_key, documents) -> str:
         "<p>The same concept can be a plant, a drink, and a colonial commodity at once. "
         "Here concepts are kept as distinct <em>senses</em>, and every claim carries the "
         "<em>perspective</em> that makes it — so different narratives sit side by side. "
-        'See the <a href="timeline.html">timeline</a> for the historical sweep.</p>'
-        f"{stats}</section>"
+        'See the <a href="timeline.html">timeline</a> for the historical sweep.</p></section>'
+        f"{overview}"
         f"{head}{index}{conflicts}{documents_section}"
     )
     # tiny inline filter (works over file:// — no fetch)
@@ -397,7 +511,7 @@ def _render_entity(graph, entity, by_key, anchors=None, views=None) -> str:
             )
         conflicts_html = f'<section><h2>Disagreements</h2>{"".join(blocks)}</section>'
 
-    body = header + senses_html + perspectives + props_html + drift_html + conflicts_html
+    body = header + senses_html + props_html + perspectives + drift_html + conflicts_html
     return _page(f"{entity.label} — idchkg", body, depth=1)
 
 
@@ -861,9 +975,29 @@ h2{font-size:1.15rem;margin:2.2em 0 .6em;padding-bottom:.3em;border-bottom:1px s
 h3{font-size:1rem;margin:0 0 .5em}
 .intro p{font-size:1.05rem;color:#333;max-width:60ch}
 .muted{color:var(--muted)}
-ul.stats{list-style:none;display:flex;gap:28px;padding:0;margin:1.4em 0 0}
-ul.stats b{font-size:1.5rem;display:block;color:var(--accent)}
-ul.stats li{font-size:.85rem;color:var(--muted)}
+/* overview: stat tiles + insight charts */
+.overview{margin:1.4em 0 0}
+.stat-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:12px;margin:1em 0 1.7em}
+.stat-tile{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:13px 15px;
+  display:flex;flex-direction:column;gap:2px}
+.stat-num{font-size:1.7rem;font-weight:700;color:var(--accent);line-height:1.1}
+.stat-label{font-size:.78rem;color:var(--muted)}
+.chart-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px}
+figure.chart{margin:0;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.fig-title{font-weight:600;font-size:.95rem;margin-bottom:.8em}
+.fig-note{font-size:.8rem;color:var(--muted);margin-top:.8em}
+.barlist{display:flex;flex-direction:column;gap:7px}
+.barrow{display:grid;grid-template-columns:92px 1fr auto;align-items:center;gap:9px;font-size:.82rem}
+.barlabel{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bartrack{background:#ece7df;border-radius:4px;height:14px;overflow:hidden}
+.barfill{display:block;height:100%;min-width:2px;background:var(--accent);border-radius:4px}
+.barval{color:var(--muted);font-variant-numeric:tabular-nums}
+.divbar{display:flex;height:24px;gap:2px;border-radius:5px;overflow:hidden}
+.divseg{display:flex;align-items:center;justify-content:center;color:#fff;font-size:.72rem;
+  font-variant-numeric:tabular-nums;min-width:2px}
+.chart-legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:.7em;font-size:.78rem;color:var(--muted)}
+.leg{display:inline-flex;align-items:center;gap:5px}
+.swatch{width:11px;height:11px;border-radius:3px;display:inline-block}
 input#filter{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;
   font-size:1rem;margin:.4em 0 1em;background:var(--panel)}
 ul.entity-list{list-style:none;padding:0;margin:0;columns:2;column-gap:32px}
