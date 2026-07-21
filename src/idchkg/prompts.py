@@ -63,6 +63,8 @@ Rules:
 - subject_sense / object_sense: when the subject or object is a
   multi-dimensional concept, give the sense it is used in here (matching the
   entity's sense, e.g. "plant" or "beverage"), else "".
+- For sources that come from Project Gutenberg or the Internet archive, ignore 
+  the preamble that states the source. 
 """
 
 EXTRACTION_SCHEMA: dict = {
