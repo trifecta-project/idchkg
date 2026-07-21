@@ -44,6 +44,9 @@ def cmd_build(args: argparse.Namespace) -> int:
         judge_model=args.judge_model,
         judge_threshold=args.threshold,
         concurrency=args.concurrency,
+        link_dbpedia=args.link_dbpedia,
+        spotlight_url=args.spotlight_url,
+        spotlight_confidence=args.spotlight_confidence,
     )
     pipeline = Pipeline(config)
     documents = pipeline.load_documents(args.paths)
@@ -118,6 +121,24 @@ def cmd_site(args: argparse.Namespace) -> int:
     else:
         out = build_site(KnowledgeGraph.load_json(args.graph), args.out)
     print(f"Wrote static site to {out}/ — open {out}/index.html (or: python -m http.server -d {out})")
+    return 0
+
+
+def cmd_link(args: argparse.Namespace) -> int:
+    """Enrich an existing graph.db by linking its entities to DBpedia in place."""
+    from .link import DBpediaLinker
+    from .store import enrich_sqlite
+
+    if not str(args.db).endswith(".db"):
+        print("link operates on a graph.db (SQLite) file.", file=sys.stderr)
+        return 1
+    kwargs = {"confidence": args.spotlight_confidence}
+    if args.spotlight_url:
+        kwargs["spotlight_url"] = args.spotlight_url
+    linker = DBpediaLinker(**kwargs)
+    print(f"Linking entities in {args.db} to DBpedia (this sends entity labels + context to the Spotlight service)...")
+    n = enrich_sqlite(args.db, linker, relink=args.relink, concurrency=args.concurrency)
+    print(f"Linked {n} entit{'y' if n == 1 else 'ies'} to DBpedia.")
     return 0
 
 
@@ -216,6 +237,12 @@ def main(argv: list[str] | None = None) -> int:
         "--store", default="memory", choices=["memory", "sqlite"],
         help="memory: build in RAM + write all exports (default). sqlite: stream to graph.db, bounded memory (graph.db only)",
     )
+    build.add_argument(
+        "--link-dbpedia", action="store_true",
+        help="Link entities to DBpedia via Spotlight (opt-in; sends entity labels + context to the Spotlight service)",
+    )
+    build.add_argument("--spotlight-url", default=None, help="Spotlight REST base URL (default: public api.dbpedia-spotlight.org/en)")
+    build.add_argument("--spotlight-confidence", type=float, default=0.5, help="Spotlight/link confidence cutoff (default: 0.5)")
     build.add_argument("-q", "--quiet", action="store_true", help="Only warnings/errors")
     build.add_argument("-v", "--verbose", action="store_true", help="Per-call LLM timing/token metrics (DEBUG)")
     build.set_defaults(func=cmd_build)
@@ -245,6 +272,14 @@ def main(argv: list[str] | None = None) -> int:
     site.add_argument("graph", help="Path to graph.db or graph.json")
     site.add_argument("-o", "--out", default="site", help="Output directory (default: site)")
     site.set_defaults(func=cmd_site)
+
+    link = sub.add_parser("link", help="Link an existing graph.db's entities to DBpedia (in place)")
+    link.add_argument("db", help="Path to graph.db")
+    link.add_argument("--spotlight-url", default=None, help="Spotlight REST base URL (default: public api.dbpedia-spotlight.org/en)")
+    link.add_argument("--spotlight-confidence", type=float, default=0.5, help="Spotlight/link confidence cutoff (default: 0.5)")
+    link.add_argument("--relink", action="store_true", help="Re-link entities that already have a DBpedia link")
+    link.add_argument("--concurrency", type=int, default=4, help="Parallel linking requests (default: 4)")
+    link.set_defaults(func=cmd_link)
 
     args = parser.parse_args(argv)
 

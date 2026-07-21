@@ -54,7 +54,8 @@ CREATE TABLE entities (
     mention_count INTEGER,
     aliases TEXT,
     descriptions TEXT,
-    contexts TEXT
+    contexts TEXT,
+    dbpedia TEXT
 );
 CREATE TABLE claims (
     id TEXT PRIMARY KEY,
@@ -98,12 +99,13 @@ def save_sqlite(kg: KnowledgeGraph, path: str | Path) -> None:
 
         for e in data["entities"]:
             conn.execute(
-                "INSERT INTO entities VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO entities VALUES (?,?,?,?,?,?,?,?,?)",
                 (
                     e["id"], e["label"], e["type"], e["sense"], e["mention_count"],
                     json.dumps(e["aliases"], ensure_ascii=False),
                     json.dumps(e["descriptions"], ensure_ascii=False),
                     json.dumps(e["contexts"], ensure_ascii=False),
+                    json.dumps(e["dbpedia"], ensure_ascii=False) if e.get("dbpedia") else None,
                 ),
             )
 
@@ -159,6 +161,7 @@ def load_sqlite(path: str | Path) -> KnowledgeGraph:
                 "aliases": json.loads(r["aliases"]),
                 "descriptions": json.loads(r["descriptions"]),
                 "contexts": json.loads(r["contexts"]),
+                "dbpedia": _load_dbpedia(r),
             }
             for r in conn.execute("SELECT * FROM entities")
         ]
@@ -240,9 +243,53 @@ def retrieve(path: str | Path, query: str, k: int = 5) -> list[dict]:
     ]
 
 
+def _entities_has_dbpedia(conn) -> bool:
+    return any(row[1] == "dbpedia" for row in conn.execute("PRAGMA table_info(entities)"))
+
+
+def enrich_sqlite(path: str | Path, linker, relink: bool = False, concurrency: int = 4) -> int:
+    """Link an existing graph.db's entities to DBpedia in place, adding the
+    ``dbpedia`` column if the file predates it. Returns the number newly linked.
+
+    ``linker`` is a ``DBpediaLinker`` (or any object with ``link_entities``);
+    injecting one keeps this testable offline. Already-linked entities are left
+    alone unless ``relink=True``.
+    """
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _entities_has_dbpedia(conn):
+            conn.execute("ALTER TABLE entities ADD COLUMN dbpedia TEXT")
+            conn.commit()
+        rows = conn.execute("SELECT * FROM entities").fetchall()
+        todo = [_entity_from_row(r) for r in rows if relink or not _load_dbpedia(r)]
+        linked = linker.link_entities(todo, concurrency=concurrency)
+        for entity in todo:
+            if entity.dbpedia:
+                conn.execute(
+                    "UPDATE entities SET dbpedia=? WHERE id=?",
+                    (json.dumps(entity.dbpedia, ensure_ascii=False), entity.id),
+                )
+        conn.commit()
+        return linked
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------
 # Row reconstruction (shared by GraphStore)
 # --------------------------------------------------------------------------
+
+def _load_dbpedia(r) -> dict | None:
+    """Parse the entity's ``dbpedia`` JSON, tolerating DBs written before the
+    column existed (an old file's row simply has no such key)."""
+    if "dbpedia" not in r.keys() or not r["dbpedia"]:
+        return None
+    try:
+        return json.loads(r["dbpedia"])
+    except (TypeError, json.JSONDecodeError):
+        return None
+
 
 def _entity_from_row(r) -> Entity:
     return Entity(
@@ -251,6 +298,7 @@ def _entity_from_row(r) -> Entity:
         aliases=json.loads(r["aliases"]) if r["aliases"] else [],
         descriptions=json.loads(r["descriptions"]) if r["descriptions"] else [],
         contexts=json.loads(r["contexts"]) if r["contexts"] else [],
+        dbpedia=_load_dbpedia(r),
     )
 
 
@@ -329,12 +377,13 @@ class GraphStore:
 
     def add_entity(self, entity: Entity) -> None:
         self.conn.execute(
-            "INSERT OR REPLACE INTO entities VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO entities VALUES (?,?,?,?,?,?,?,?,?)",
             (
                 entity.id, entity.label, entity.type, entity.sense, entity.mention_count,
                 json.dumps(entity.aliases, ensure_ascii=False),
                 json.dumps(entity.descriptions, ensure_ascii=False),
                 json.dumps(entity.contexts, ensure_ascii=False),
+                json.dumps(entity.dbpedia, ensure_ascii=False) if entity.dbpedia else None,
             ),
         )
 

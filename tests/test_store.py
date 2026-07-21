@@ -171,3 +171,70 @@ def test_graphstore_conflicts_via_sql(tmp_path):
     assert len(groups) == 1
     assert {c.object for c in groups[0]} == {"drink", "commodity"}
     store.close()
+
+
+_DBP = {"uri": "http://dbpedia.org/resource/Coffee", "score": 0.98,
+        "surfaceForm": "coffee", "types": ["http://dbpedia.org/ontology/Beverage"],
+        "dbo_type": ["http://dbpedia.org/resource/Espresso"]}
+
+
+def test_dbpedia_field_roundtrips_json_and_sqlite(tmp_path):
+    kg = KnowledgeGraph()
+    kg.add_document(Document(id="d", text="Coffee is a beverage."))
+    kg.add_entity(Entity(id="ent-coffee", label="coffee", dbpedia=_DBP))
+    kg.add_entity(Entity(id="ent-plain", label="plain"))  # unlinked -> stays None
+
+    path = tmp_path / "g.db"
+    save_sqlite(kg, path)
+    kg2 = load_sqlite(path)
+    by_id = {e.id: e for e in kg2.entities}
+    assert by_id["ent-coffee"].dbpedia == _DBP
+    assert by_id["ent-plain"].dbpedia is None
+
+    # JSON export path carries it too.
+    jpath = tmp_path / "g.json"
+    kg.save_json(jpath)
+    kg3 = KnowledgeGraph.load_json(jpath)
+    assert {e.id: e.dbpedia for e in kg3.entities}["ent-coffee"] == _DBP
+
+
+class _FakeLinker:
+    """Links any entity whose label is 'coffee'; ignores the rest."""
+
+    def link_entities(self, entities, concurrency=4):
+        n = 0
+        for e in entities:
+            if e.label.casefold() == "coffee":
+                e.dbpedia = _DBP
+                n += 1
+        return n
+
+
+def test_enrich_sqlite_adds_column_to_old_db_and_populates(tmp_path):
+    from idchkg.store import enrich_sqlite
+
+    # Simulate a pre-feature DB: build normally, then drop the dbpedia column
+    # so the file looks like one written before the column existed.
+    kg = KnowledgeGraph()
+    kg.add_document(Document(id="d", text="Coffee is a beverage."))
+    kg.add_entity(Entity(id="ent-coffee", label="coffee"))
+    kg.add_entity(Entity(id="ent-sugar", label="sugar"))
+    path = tmp_path / "old.db"
+    save_sqlite(kg, path)
+
+    import sqlite3
+    conn = sqlite3.connect(str(path))
+    conn.execute("ALTER TABLE entities DROP COLUMN dbpedia")
+    conn.commit()
+    conn.close()
+
+    # Querying the column-less DB must not error (tolerant reader).
+    kg_old = load_sqlite(path)
+    assert all(e.dbpedia is None for e in kg_old.entities)
+
+    # Enrich in place: adds the column back and populates the matching entity.
+    n = enrich_sqlite(path, _FakeLinker())
+    assert n == 1
+    by_id = {e.id: e for e in load_sqlite(path).entities}
+    assert by_id["ent-coffee"].dbpedia == _DBP
+    assert by_id["ent-sugar"].dbpedia is None

@@ -178,6 +178,26 @@ Want to try it on real text? `python examples/corpora/fetch.py` populates
 representative corpora (Project Gutenberg + Wikipedia) into a gitignored
 `raw/`/`wiki/` you can point `build` at.
 
+### Link entities to DBpedia
+
+Optionally connect each entity to its **DBpedia** resource via [DBpedia
+Spotlight](https://www.dbpedia.org/resources/spotlight/), which disambiguates
+using context (so *coffee* the plant and *coffee* the beverage resolve to
+different resources). The link — resource URI, confidence, and its DBpedia
+ontology types (`rdf:type` and `dbo:type`) — is stored in a new `dbpedia` column
+on the `entities` table and shown on each entity's page in the browse site.
+
+```bash
+idchkg build examples/corpus --link-dbpedia -o out   # link during the build
+idchkg link out/graph.db                             # or enrich an existing graph.db in place (no rebuild)
+idchkg link out/graph.db --spotlight-url http://localhost:2222/rest   # use a local Spotlight
+```
+
+> **Note:** linking is **opt-in** and, on the default public endpoint, sends
+> entity labels + a little context to the DBpedia Spotlight service — the only
+> step that leaves your machine. Point `--spotlight-url` at a local Spotlight to
+> keep it fully offline.
+
 ### Browse it as a web site
 
 Turn a built graph into a static, zero-dependency browse site — one page per
@@ -258,9 +278,10 @@ src/idchkg/
   extract.py    chunking + LLM extraction (+ deterministic validation gate)
   judge.py      LLM judge panel (groundedness, qualifier fidelity)
   resolve.py    (label, sense) entity resolution + near-identity links
+  link.py       optional DBpedia entity linking via Spotlight (context-aware)
   graph.py      in-memory knowledge graph + JSON/GraphML/Turtle export
-  pipeline.py   orchestration (extract → judge → repair → load)
-  cli.py        `idchkg build` / `idchkg query`
+  pipeline.py   orchestration (extract → judge → repair → [link] → load)
+  cli.py        `idchkg build` / `idchkg query` / `idchkg link` / `idchkg site`
 examples/       coffee demo + offline demo script
   corpora/      representative food- & maritime-history corpora + a catalogue
                 (examples/corpora/README.md) of real datasets to scale to

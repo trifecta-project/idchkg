@@ -43,6 +43,48 @@ def _run(mock, text="Coffee is a beverage. Historians dispute the colonial frami
     return pipeline.run([Document(id="doc", text=text)])
 
 
+class _FakeLinker:
+    """Offline stand-in for DBpediaLinker: tags any 'coffee' entity."""
+
+    def link_entities(self, entities, concurrency=4):
+        n = 0
+        for e in entities:
+            if e.label.casefold() == "coffee":
+                e.dbpedia = {"uri": "http://dbpedia.org/resource/Coffee", "score": 0.9,
+                             "surfaceForm": "coffee", "types": [], "dbo_type": []}
+                n += 1
+        return n
+
+
+def test_dbpedia_linker_runs_when_injected():
+    from idchkg.models import Document
+
+    mock = MockLLM().queue(
+        _extraction(_claim("coffee", "is a", "beverage")),  # chunk 0
+        _verdict(1.0, True),                                 # groundedness
+        _verdict(1.0, True),                                 # qualifier
+    )
+    pipeline = Pipeline(
+        PipelineConfig(backend="mock"),
+        extractor_client=mock,
+        judge_client=mock,
+        linker=_FakeLinker(),
+    )
+    result = pipeline.run([Document(id="doc", text="Coffee is a beverage.")])
+    coffee = result.graph.find_entity("coffee")
+    assert coffee is not None and coffee.dbpedia["uri"] == "http://dbpedia.org/resource/Coffee"
+
+
+def test_no_linker_leaves_entities_unlinked():
+    mock = MockLLM().queue(
+        _extraction(_claim("coffee", "is a", "beverage")),
+        _verdict(1.0, True),
+        _verdict(1.0, True),
+    )
+    result = _run(mock)  # no linker configured
+    assert result.graph.find_entity("coffee").dbpedia is None
+
+
 def test_accepted_claim_enters_graph():
     mock = MockLLM().queue(
         _extraction(_claim("coffee", "is a", "beverage")),  # chunk 0

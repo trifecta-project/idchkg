@@ -70,6 +70,11 @@ class PipelineConfig:
     chunk_chars: int = 1600
     concurrency: int = 4                # worker threads for LLM calls across chunks
     aliases: dict[str, str] = field(default_factory=dict)
+    # DBpedia entity linking (opt-in; makes network calls to a Spotlight server).
+    link_dbpedia: bool = False
+    spotlight_url: str | None = None    # None -> DBpediaLinker default (public API)
+    spotlight_confidence: float = 0.5
+    spotlight_concurrency: int = 4
 
 
 @dataclass
@@ -118,8 +123,19 @@ class Pipeline:
         config: PipelineConfig | None = None,
         extractor_client: LLMClient | None = None,
         judge_client: LLMClient | None = None,
+        linker=None,
     ):
         self.config = config or PipelineConfig()
+        # DBpedia linker: injected (tests pass a stub), or built on demand when
+        # link_dbpedia is set. None means the linking step is skipped.
+        self.linker = linker
+        if self.linker is None and self.config.link_dbpedia:
+            from .link import DBpediaLinker
+
+            kwargs = {"confidence": self.config.spotlight_confidence}
+            if self.config.spotlight_url:
+                kwargs["spotlight_url"] = self.config.spotlight_url
+            self.linker = DBpediaLinker(**kwargs)
         self._extractor_client = extractor_client or get_client(
             self.config.backend, self.config.model
         )
@@ -201,6 +217,14 @@ class Pipeline:
                 resolver.add_mention(mention)
             for outcome in work.outcomes:
                 self._apply_outcome(outcome, graph, resolver, result)
+
+        # Optionally link entities to DBpedia (context-aware) before they are
+        # finalised, so the populated `dbpedia` field is persisted by both the
+        # in-memory graph and the streaming SQLite store in one write.
+        if self.linker is not None:
+            started_link = time.perf_counter()
+            n = self.linker.link_entities(resolver.entities, concurrency=self.config.spotlight_concurrency)
+            logger.info("DBpedia linking: %d entities linked in %.1fs", n, time.perf_counter() - started_link)
 
         # Register contextual / near-identity links between senses (Challenge 1).
         for link in resolver.identity_links:

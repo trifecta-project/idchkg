@@ -331,6 +331,7 @@ class KnowledgeGraph:
                 descriptions=item.get("descriptions", []),
                 contexts=item.get("contexts", []),
                 mention_count=item.get("mention_count", 0),
+                dbpedia=item.get("dbpedia"),
             )
             entities[entity.id] = entity
             kg.add_entity(entity)

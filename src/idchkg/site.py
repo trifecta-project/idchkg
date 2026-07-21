@@ -241,6 +241,33 @@ def _render_conflicts_section(graph, by_key, prefix: str, limit: int = 25) -> st
     )
 
 
+def _short_uri(uri: str) -> str:
+    """Last path/fragment segment of a URI, for a readable chip label."""
+    tail = uri.rstrip("/").rsplit("#", 1)[-1].rsplit("/", 1)[-1]
+    return tail.replace("_", " ") or uri
+
+
+def _dbpedia_html(entity) -> str:
+    """The DBpedia link + ontology-type chips for an entity, when linked."""
+    link = getattr(entity, "dbpedia", None)
+    if not link or not link.get("uri"):
+        return ""
+    uri = link["uri"]
+    score = link.get("score")
+    title = f'Spotlight confidence {score:.2f}' if isinstance(score, (int, float)) else "DBpedia resource"
+    # De-duplicate ontology classes (@types) and the dbo:type property values.
+    type_uris = list(dict.fromkeys((link.get("types") or []) + (link.get("dbo_type") or [])))
+    chips = "".join(
+        f'<a class="dbo-chip" href="{_esc(t)}">{_esc(_short_uri(t))}</a>' for t in type_uris
+    )
+    chips_html = f'<span class="dbo-types">{chips}</span>' if chips else ""
+    return (
+        '<p class="dbpedia">'
+        f'<a class="dbpedia-link" href="{_esc(uri)}" title="{_esc(title)}">DBpedia ↗</a>'
+        f'{chips_html}</p>'
+    )
+
+
 def _render_entity(graph, entity, by_key) -> str:
     prefix = ""  # sibling entity pages live in the same entity/ directory
     label = _esc(entity.label)
@@ -252,6 +279,7 @@ def _render_entity(graph, entity, by_key) -> str:
     )
     if entity.descriptions:
         header += f'<p class="desc">{_esc(entity.descriptions[0])}</p>'
+    header += _dbpedia_html(entity)
     header += "</section>"
 
     # Sense switcher (Challenge 1: identity) — sibling senses of the same label.
@@ -746,6 +774,12 @@ ul.entity-list em{color:var(--muted);font-style:normal}
 .meta{color:var(--muted);margin:.1em 0 .4em}
 .type{text-transform:capitalize}
 .desc{max-width:60ch}
+.dbpedia{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:.5em 0}
+.dbpedia-link{font-weight:600;font-size:.85rem}
+.dbo-types{display:flex;gap:6px;flex-wrap:wrap}
+.dbo-chip{font-size:.72rem;font-weight:500;padding:1px 8px;border-radius:999px;background:#e4efec;
+  color:#0e6f66;border:1px solid #bcd8d2;text-decoration:none}
+.dbo-chip:hover{background:#d5e8e3;text-decoration:none}
 .props{list-style:none;padding:0;margin:0}
 .props li{padding:.25em 0;border-bottom:1px solid var(--line)}
 .pred{color:var(--muted)}

@@ -134,6 +134,9 @@ class Entity:
     descriptions: list[str] = field(default_factory=list)
     contexts: list[str] = field(default_factory=list)
     mention_count: int = 0  # head vs long-tail signal (Challenge 3)
+    # DBpedia link (optional, set by the linking step / `idchkg link`):
+    # {"uri", "score", "surfaceForm", "types", "dbo_type"} or None when unlinked.
+    dbpedia: dict | None = None
 
 
 @dataclass
