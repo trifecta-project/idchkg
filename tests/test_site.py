@@ -31,6 +31,52 @@ def _store(tmp_path) -> GraphStore:
     return GraphStore(tmp_path / "g.db", mode="query")
 
 
+def test_source_link_points_to_the_quote_paragraph(tmp_path):
+    # A multi-paragraph document; the claim's quote lives in the 3rd paragraph.
+    store = GraphStore(tmp_path / "g.db", mode="build")
+    coffee = Entity(id="ent-coffee--beverage", label="coffee", sense="beverage", mention_count=1)
+    society = Entity(id="ent-society", label="society", mention_count=1)
+    text = "First paragraph about nothing.\n\nSecond paragraph, still nothing.\n\nCoffee refined society in the coffee-house era."
+    store.add_document(Document(id="doc", text=text, title="Coffee"))
+    store.add_claim(
+        Claim("coffee", "refines", "society",
+              perspective=Perspective("writers", "asserts", "neutral"),
+              provenance=Provenance("doc", "doc#c0", "Coffee refined society", "mock")),
+        coffee, society)
+    store.finalize_entities([coffee, society])
+    store.close()
+
+    store = GraphStore(tmp_path / "g.db", mode="query")
+    out = build_site(store, tmp_path / "site")
+    store.close()
+
+    # The document page numbers its paragraphs, and the quote is in p2.
+    doc = (out / "doc" / "doc.html").read_text(encoding="utf-8")
+    assert '<p id="p0">' in doc and '<p id="p2">' in doc
+    assert 'id="p2">Coffee refined society' in doc
+
+    # The 'source' link on the entity page targets that exact paragraph.
+    entity = (out / "entity" / "ent-coffee--beverage.html").read_text(encoding="utf-8")
+    assert 'class="src-doc" href="../doc/doc.html#p2"' in entity
+
+
+def test_geomap_is_zoomable(tmp_path):
+    store = GraphStore(tmp_path / "g.db", mode="build")
+    brazil = Entity(id="ent-brazil", label="Brazil", type="place", mention_count=5)
+    store.add_document(Document(id="d", text="Coffee grew in Brazil."))
+    store.finalize_entities([brazil])
+    store.close()
+
+    store = GraphStore(tmp_path / "g.db", mode="query")
+    out = build_site(store, tmp_path / "site")
+    store.close()
+
+    geo = (out / "geomap.html").read_text(encoding="utf-8")
+    assert 'id="geomap-svg"' in geo          # the SVG is targetable by the zoom script
+    assert 'id="geo-in"' in geo and 'id="geo-reset"' in geo  # zoom controls
+    assert "addEventListener('wheel'" in geo  # wheel-zoom wired up
+
+
 def test_build_site_writes_pages(tmp_path):
     store = _store(tmp_path)
     out = build_site(store, tmp_path / "site")
@@ -135,9 +181,11 @@ def test_branding_assets_and_funding_statement(tmp_path):
         assert (out / f).read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
 
     index = (out / "index.html").read_text(encoding="utf-8")
-    # Header: TRIFECTA logo + tagline.
+    # Header: TRIFECTA logo links out to the project site; 'idchkg' links home.
     assert 'src="assets/trifecta-logo.png"' in index
-    assert "Better Knowledge Graphs for Humanities Research" in index
+    assert 'class="brand-logo-link" href="https://trifecta.dhlab.nl"' in index
+    assert 'class="brand-name" href="index.html">idchkg</a>' in index
+    assert "An Unflattened Identity and Change Knowledge Graph" in index
     # Footer: ERC logo + the required EU funding statement.
     assert 'src="assets/erc-logo.png"' in index
     assert "Funded by the European Union under grant agreement 101088548" in index

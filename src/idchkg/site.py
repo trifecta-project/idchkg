@@ -60,13 +60,46 @@ def _entity_link(label: str, sense: str, by_key: dict, prefix: str) -> str:
     return f"<span class=\"ent\">{_esc(label)}</span>"
 
 
+def _paragraphs(text: str) -> list[str]:
+    """Document text split into the same non-empty paragraphs the document page
+    renders — so paragraph indices line up with the ``#p<i>`` anchors."""
+    return [p for p in (text or "").split("\n\n") if p.strip()]
+
+
+def _norm(s: str) -> str:
+    """Whitespace-collapsed, case-folded text for quote↔paragraph matching."""
+    return " ".join((s or "").split()).casefold()
+
+
+def _claim_anchors(graph, documents) -> dict[str, str]:
+    """Map each claim id → the ``#p<i>`` anchor of the paragraph its provenance
+    quote appears in, so a 'source' link jumps to the exact paragraph (not just
+    the top of a long document). Claims whose quote can't be located are absent
+    (the link falls back to the document top)."""
+    anchors: dict[str, str] = {}
+    for doc in documents:
+        norm_paras = [_norm(p) for p in _paragraphs(doc.text or "")]
+        if not norm_paras:
+            continue
+        for claim in graph.claims_in_document(doc.id):
+            prov = claim.provenance
+            quote = _norm(prov.quote) if prov and prov.quote else ""
+            if not quote:
+                continue
+            for i, para in enumerate(norm_paras):
+                if quote in para:
+                    anchors[claim.id] = f"#p{i}"
+                    break
+    return anchors
+
+
 def _prop_html(prop: dict, by_key: dict, prefix: str) -> str:
     other = _entity_link(prop["other"], "", by_key, prefix)
     ctx = f' <span class="ctx">⟨{_esc(prop["context"])}⟩</span>' if prop.get("context") else ""
     return f'<li><span class="pred">{_esc(prop["predicate"])}</span> {other}{ctx}</li>'
 
 
-def _claim_html(claim, by_key: dict, prefix: str, doc_prefix: str = "doc/") -> str:
+def _claim_html(claim, by_key: dict, prefix: str, doc_prefix: str = "doc/", anchors: dict | None = None) -> str:
     subj = _entity_link(claim.subject, claim.subject_sense, by_key, prefix)
     obj = _entity_link(claim.object, claim.object_sense, by_key, prefix)
     stance = claim.perspective.stance
@@ -84,8 +117,10 @@ def _claim_html(claim, by_key: dict, prefix: str, doc_prefix: str = "doc/") -> s
         if prov.quote:
             quote = f'<blockquote>{_esc(prov.quote)}</blockquote>'
         if prov.document_id:
-            # link the source back to the underlying document (provenance)
-            source = f'<a class="src-doc" href="{doc_prefix}{_esc(prov.document_id)}.html">source: {_esc(prov.document_id)}</a>'
+            # Link the source back to the underlying document (provenance), and
+            # to the exact paragraph when we could locate the quote there.
+            anchor = (anchors or {}).get(claim.id, "")
+            source = f'<a class="src-doc" href="{doc_prefix}{_esc(prov.document_id)}.html{anchor}">source: {_esc(prov.document_id)}</a>'
         if prov.verdicts:
             rows = "".join(
                 f'<li><span class="crit">{_esc(v.criterion)}</span> '
@@ -118,10 +153,10 @@ def _page(title: str, body: str, depth: int) -> str:
 <link rel="stylesheet" href="{up}style.css">
 </head>
 <body>
-<header class="site"><div class="wrap"><a class="brand" href="{up}index.html">
-<img class="brand-logo" src="{up}assets/trifecta-logo.png" alt="TRIFECTA" width="54" height="60">
-<span class="brand-name">idchkg</span></a>
-<span class="tagline">Better Knowledge Graphs for Humanities Research</span>
+<header class="site"><div class="wrap"><div class="brand">
+<a class="brand-logo-link" href="https://trifecta.dhlab.nl" title="TRIFECTA — trifecta.dhlab.nl"><img class="brand-logo" src="{up}assets/trifecta-logo.png" alt="TRIFECTA" width="54" height="60"></a>
+<a class="brand-name" href="{up}index.html">idchkg</a></div>
+<span class="tagline">An Unflattened Identity and Change Knowledge Graph</span>
 <nav><a href="{up}index.html">Browse</a> <a href="{up}timeline.html">Timeline</a> <a href="{up}heatmap.html">Heatmap</a> <a href="{up}geomap.html">Map</a></nav></div></header>
 <main class="wrap">
 {body}
@@ -268,7 +303,7 @@ def _dbpedia_html(entity) -> str:
     )
 
 
-def _render_entity(graph, entity, by_key) -> str:
+def _render_entity(graph, entity, by_key, anchors=None) -> str:
     prefix = ""  # sibling entity pages live in the same entity/ directory
     label = _esc(entity.label)
     sub = f'<span class="sense">{_esc(entity.sense)}</span>' if entity.sense else '<span class="sense muted">unspecified sense</span>'
@@ -304,7 +339,7 @@ def _render_entity(graph, entity, by_key) -> str:
     grouped = graph.perspectives_on(entity)
     persp_cards = ""
     for viewpoint, claims in sorted(grouped.items(), key=lambda kv: (-len(kv[1]), kv[0])):
-        claim_lis = "".join(_claim_html(c, by_key, prefix, doc_prefix="../doc/") for c in claims)
+        claim_lis = "".join(_claim_html(c, by_key, prefix, doc_prefix="../doc/", anchors=anchors) for c in claims)
         persp_cards += (
             f'<article class="viewpoint"><h3>{_esc(viewpoint)}</h3>'
             f'<ul class="claims">{claim_lis}</ul></article>'
@@ -498,6 +533,30 @@ def _geocode_entity(entity) -> tuple[float, float] | None:
     return None
 
 
+# Self-contained pan/zoom for the map SVG (viewBox manipulation; works over
+# file://). Scroll/pinch to zoom toward the cursor, drag to pan, buttons to step.
+_GEO_ZOOM_JS = """<script>
+(function(){
+ var svg=document.getElementById('geomap-svg');if(!svg)return;
+ var W=800,H=400,MINW=100,vb={x:0,y:0,w:W,h:H};
+ function apply(){svg.setAttribute('viewBox',vb.x.toFixed(2)+' '+vb.y.toFixed(2)+' '+vb.w.toFixed(2)+' '+vb.h.toFixed(2));}
+ function clamp(){var mx=W*0.15,my=H*0.15;vb.x=Math.max(-mx,Math.min(W-vb.w+mx,vb.x));vb.y=Math.max(-my,Math.min(H-vb.h+my,vb.y));}
+ function zoom(f,cx,cy){var nw=Math.max(MINW,Math.min(W,vb.w*f)),nh=nw*(H/W);vb.x=cx-(cx-vb.x)*(nw/vb.w);vb.y=cy-(cy-vb.y)*(nh/vb.h);vb.w=nw;vb.h=nh;clamp();apply();}
+ function pt(e){var r=svg.getBoundingClientRect();return{x:vb.x+(e.clientX-r.left)/r.width*vb.w,y:vb.y+(e.clientY-r.top)/r.height*vb.h};}
+ svg.addEventListener('wheel',function(e){e.preventDefault();var p=pt(e);zoom(e.deltaY<0?0.85:1/0.85,p.x,p.y);},{passive:false});
+ var drag=null,moved=false;
+ svg.addEventListener('pointerdown',function(e){drag={x:e.clientX,y:e.clientY,vx:vb.x,vy:vb.y};moved=false;try{svg.setPointerCapture(e.pointerId);}catch(_){}});
+ svg.addEventListener('pointermove',function(e){if(!drag)return;var r=svg.getBoundingClientRect();if(Math.abs(e.clientX-drag.x)+Math.abs(e.clientY-drag.y)>3)moved=true;vb.x=drag.vx-(e.clientX-drag.x)/r.width*vb.w;vb.y=drag.vy-(e.clientY-drag.y)/r.height*vb.h;clamp();apply();});
+ function end(){drag=null;}svg.addEventListener('pointerup',end);svg.addEventListener('pointerleave',end);
+ svg.addEventListener('click',function(e){if(moved){e.preventDefault();e.stopPropagation();}},true);
+ function step(f){return function(){zoom(f,vb.x+vb.w/2,vb.y+vb.h/2);};}
+ document.getElementById('geo-in').addEventListener('click',step(0.7));
+ document.getElementById('geo-out').addEventListener('click',step(1/0.7));
+ document.getElementById('geo-reset').addEventListener('click',function(){vb={x:0,y:0,w:W,h:H};apply();});
+})();
+</script>"""
+
+
 def _render_geomap(graph, entities, by_key) -> str:
     """A geographical heatmap: place entities plotted on a world map, coloured by frequency."""
     places = [e for e in entities if e.type == "place"]
@@ -579,7 +638,7 @@ def _render_geomap(graph, entities, by_key) -> str:
         axis_labels.append(f'<text x="4" y="{y:.0f}" class="geo-axis">{lat}°</text>')
 
     svg = (
-        f'<svg class="geo-svg" viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg">'
+        f'<svg id="geomap-svg" class="geo-svg" viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg">'
         f'{map_bg}'
         f'<g class="geo-land">{COUNTRIES_SVG}</g>'
         f'{graticule_svg}'
@@ -611,11 +670,21 @@ def _render_geomap(graph, entities, by_key) -> str:
             f'<ul class="entity-list">{items}</ul></section>'
         )
 
+    controls = (
+        '<div class="geo-controls">'
+        '<button type="button" id="geo-in" title="Zoom in" aria-label="Zoom in">+</button>'
+        '<button type="button" id="geo-out" title="Zoom out" aria-label="Zoom out">−</button>'
+        '<button type="button" id="geo-reset" title="Reset view" aria-label="Reset view">⟲</button>'
+        '</div>'
+    )
+    geo = f'<div class="geo-wrap">{svg}{controls}</div>'
+
     body = (
         '<section class="intro"><h1>Geographical heatmap</h1>'
         f'<p>Location entities plotted on a world map — larger, warmer circles mean more mentions. '
-        f'{len(resolved)} of {len(places)} place entities mapped.</p></section>'
-        f'{legend}{svg}{unresolved_html}'
+        f'{len(resolved)} of {len(places)} place entities mapped. '
+        '<span class="muted">Scroll to zoom, drag to pan.</span></p></section>'
+        f'{legend}{geo}{unresolved_html}{_GEO_ZOOM_JS}'
     )
     return _page("Map — idchkg", body, depth=0)
 
@@ -661,36 +730,41 @@ def build_site(graph, out_dir: str | Path) -> Path:
             log_path,
         )
 
+    # Locate each claim's quote in its source document, so 'source' links can
+    # jump to the exact paragraph (matters for long documents).
+    anchors = _claim_anchors(graph, documents)
+
     (out / "style.css").write_text(_CSS, encoding="utf-8")
     (out / "index.html").write_text(_render_index(graph, entities, by_key, documents), encoding="utf-8")
-    (out / "timeline.html").write_text(_render_timeline(graph, by_key), encoding="utf-8")
+    (out / "timeline.html").write_text(_render_timeline(graph, by_key, anchors), encoding="utf-8")
     (out / "heatmap.html").write_text(_render_heatmap(graph, entities, by_key), encoding="utf-8")
     (out / "geomap.html").write_text(_render_geomap(graph, entities, by_key), encoding="utf-8")
     for entity in entities:
         (out / "entity" / f"{entity.id}.html").write_text(
-            _render_entity(graph, entity, by_key), encoding="utf-8"
+            _render_entity(graph, entity, by_key, anchors), encoding="utf-8"
         )
     for doc in documents:
         (out / "doc" / f"{doc.id}.html").write_text(
-            _render_document(graph, doc, by_key), encoding="utf-8"
+            _render_document(graph, doc, by_key, anchors), encoding="utf-8"
         )
     return out
 
 
-def _render_document(graph, doc, by_key) -> str:
+def _render_document(graph, doc, by_key, anchors=None) -> str:
     """A source document page: full text + the claims extracted from it (provenance)."""
     path = doc.metadata.get("path") if isinstance(doc.metadata, dict) else None
     header = (
         f'<section class="entity-head"><h1>{_esc(doc.title or doc.id)}</h1>'
         f'<p class="meta">source document{f" · {_esc(path)}" if path else ""}</p></section>'
     )
-    paragraphs = "".join(f"<p>{_esc(p)}</p>" for p in (doc.text or "").split("\n\n") if p.strip())
+    # Each paragraph gets an id so a claim's 'source' link can jump straight to it.
+    paragraphs = "".join(f'<p id="p{i}">{_esc(p)}</p>' for i, p in enumerate(_paragraphs(doc.text or "")))
     text_html = f'<section><h2>Text</h2><article class="doctext">{paragraphs}</article></section>' if paragraphs else ""
 
     claims = graph.claims_in_document(doc.id)
     claims_html = ""
     if claims:
-        lis = "".join(_claim_html(c, by_key, prefix="../entity/", doc_prefix="../doc/") for c in claims)
+        lis = "".join(_claim_html(c, by_key, prefix="../entity/", doc_prefix="../doc/", anchors=anchors) for c in claims)
         claims_html = (
             f'<section><h2>Claims extracted here ({len(claims)})</h2>'
             f'<ul class="claims">{lis}</ul></section>'
@@ -698,7 +772,7 @@ def _render_document(graph, doc, by_key) -> str:
     return _page(f"{doc.title or doc.id} — idchkg", header + text_html + claims_html, depth=1)
 
 
-def _render_timeline(graph, by_key) -> str:
+def _render_timeline(graph, by_key, anchors=None) -> str:
     """A corpus-wide vertical timeline of every dated claim (Challenge 2: change)."""
     claims = graph.dated_claims()
     intro = (
@@ -715,7 +789,8 @@ def _render_timeline(graph, by_key) -> str:
         obj = _entity_link(c.object, c.object_sense, by_key, "entity/")
         src = ""
         if c.provenance and c.provenance.document_id:
-            src = f' <a class="src-doc" href="doc/{_esc(c.provenance.document_id)}.html">source: {_esc(c.provenance.document_id)}</a>'
+            anchor = (anchors or {}).get(c.id, "")
+            src = f' <a class="src-doc" href="doc/{_esc(c.provenance.document_id)}.html{anchor}">source: {_esc(c.provenance.document_id)}</a>'
         items.append(
             f'<div class="tl-item"><div class="tl-when">{_esc(when)}</div>'
             f'<div class="tl-body"><div class="stmt">{subj} <span class="pred">{_esc(c.predicate)}</span> {obj}</div>'
@@ -741,10 +816,12 @@ a{color:var(--accent);text-decoration:none}
 a:hover{text-decoration:underline}
 header.site{border-top:3px solid var(--brand);border-bottom:1px solid var(--line);background:var(--panel)}
 header.site .wrap{display:flex;align-items:center;gap:14px;padding:14px 24px}
-.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:1.15rem;color:var(--ink)}
-.brand:hover{text-decoration:none}
+.brand{display:flex;align-items:center;gap:10px}
+.brand-logo-link{display:flex}
+.brand-logo-link:hover{text-decoration:none}
 .brand-logo{height:40px;width:auto;display:block}
-.brand-name{color:var(--ink)}
+.brand-name{font-weight:700;font-size:1.15rem;color:var(--ink)}
+.brand-name:hover{text-decoration:none}
 .tagline{color:var(--muted);font-size:.85rem}
 footer.site{border-top:1px solid var(--line);margin-top:64px;color:var(--muted);font-size:.82rem}
 footer.site .wrap{padding:26px 24px}
@@ -829,7 +906,9 @@ ul.verdicts .score{color:var(--accent)}
 /* documents */
 .doctext{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px 20px;
   max-width:66ch;color:#333}
-.doctext p{margin:.7em 0}
+.doctext p{margin:.7em 0;scroll-margin-top:80px;border-radius:4px;transition:background-color .8s ease}
+/* the paragraph a 'source' link points at is highlighted on arrival */
+.doctext p:target{background:#fff5d4;box-shadow:-10px 0 0 #fff5d4,-13px 0 0 var(--questions)}
 /* conflicts */
 .conflict{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:.6em 0}
 ul.conflict-claims{list-style:none;padding:0;margin:.3em 0 0}
@@ -837,7 +916,15 @@ ul.conflict-claims li{padding:.2em 0}
 /* geographical heatmap */
 :root{--geo-sea:#e8eff4;--geo-grid:#c0cdd8}
 .geo-land path{fill:#d6dcc4;stroke:#fff;stroke-width:.5;stroke-linejoin:round}
-.geo-svg{width:100%;max-width:820px;border-radius:8px;border:1px solid var(--line);margin:.6em 0}
+.geo-wrap{position:relative;max-width:820px;margin:.6em 0}
+.geo-svg{display:block;width:100%;border-radius:8px;border:1px solid var(--line);
+  touch-action:none;cursor:grab}
+.geo-svg:active{cursor:grabbing}
+.geo-controls{position:absolute;top:10px;right:10px;display:flex;flex-direction:column;gap:5px}
+.geo-controls button{width:32px;height:32px;padding:0;border:1px solid var(--line);
+  background:var(--panel);color:var(--ink);border-radius:7px;font-size:1.2rem;line-height:1;
+  cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+.geo-controls button:hover{background:#f0efec;border-color:var(--accent)}
 .geo-dot{fill:color-mix(in srgb,#b4472f calc(var(--heat)*100%),#e8c87a);
   stroke:#fff;stroke-width:1;cursor:pointer;transition:r .15s}
 .geo-dot:hover{r:20;fill-opacity:1}
