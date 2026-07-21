@@ -5,7 +5,9 @@ touches the network — we exercise the selection/mapping logic and the wiring
 into the pipeline, store enrichment, and site.
 """
 
-from idchkg.link import DBpediaLinker
+import logging
+
+from idchkg.link import DBpediaLinker, _ConnError
 from idchkg.models import Entity
 
 
@@ -73,6 +75,33 @@ def test_link_entities_sets_field_and_counts():
     assert n == 1
     assert a.dbpedia["uri"] == COFFEE_URI
     assert b.dbpedia is None
+
+
+class _DownLinker(DBpediaLinker):
+    """Every request fails to connect (simulates a down Spotlight endpoint)."""
+
+    def _get_json(self, url, headers):
+        raise _ConnError("connection refused")
+
+
+def test_warns_when_requests_fail_to_connect(caplog):
+    linker = _DownLinker()
+    ents = [Entity(id="a", label="coffee"), Entity(id="b", label="tea")]
+    with caplog.at_level(logging.WARNING, logger="idchkg.link"):
+        n = linker.link_entities(ents, concurrency=1)
+    assert n == 0
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("could not connect to the Spotlight server" in m for m in warnings)
+
+
+def test_no_warning_when_endpoint_up_but_nothing_matches(caplog):
+    # StubLinker reaches the "server" fine; it just links some and not others.
+    linker = StubLinker(resources_by_text={"coffee": [_resource(COFFEE_URI, "coffee", 0.9)]})
+    ents = [Entity(id="a", label="coffee"), Entity(id="b", label="unmatched")]
+    with caplog.at_level(logging.WARNING, logger="idchkg.link"):
+        n = linker.link_entities(ents, concurrency=1)
+    assert n == 1
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
 
 
 def test_context_text_includes_descriptions_and_contexts():

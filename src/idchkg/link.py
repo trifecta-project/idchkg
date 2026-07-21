@@ -26,12 +26,19 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
+
+
+class _ConnError(Exception):
+    """Internal: a request could not reach the server (vs. reached it but
+    returned an unusable body). Lets link_entities tell 'endpoint unreachable'
+    apart from 'no confident match' when deciding whether to warn."""
 
 DEFAULT_SPOTLIGHT_URL = "https://api.dbpedia-spotlight.org/en"
 
@@ -65,6 +72,10 @@ class DBpediaLinker:
         self.timeout = timeout
         self._fetch_dbo_type = fetch_dbo_type
         self.data_host = data_host.rstrip("/")
+        # Count annotate calls that never reached the Spotlight server, so a whole
+        # run against a down endpoint can warn instead of silently linking 0.
+        self._lock = threading.Lock()
+        self._annotate_conn_failures = 0
 
     # ------------------------------------------------------------- HTTP helpers
 
@@ -73,8 +84,12 @@ class DBpediaLinker:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
-            logger.debug("DBpedia request to %s failed: %s", url, exc)
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            logger.debug("DBpedia request to %s could not connect: %s", url, exc)
+            raise _ConnError(str(exc)) from exc
+        except json.JSONDecodeError as exc:
+            # Reached the server but got an unusable body — not a connectivity fault.
+            logger.debug("DBpedia request to %s returned invalid JSON: %s", url, exc)
             return None
 
     def annotate(self, text: str) -> list[dict]:
@@ -83,9 +98,14 @@ class DBpediaLinker:
         if not text.strip():
             return []
         query = urllib.parse.urlencode({"text": text, "confidence": self.confidence})
-        body = self._get_json(
-            f"{self.spotlight_url}/annotate?{query}", {"Accept": "application/json"}
-        )
+        try:
+            body = self._get_json(
+                f"{self.spotlight_url}/annotate?{query}", {"Accept": "application/json"}
+            )
+        except _ConnError:
+            with self._lock:
+                self._annotate_conn_failures += 1
+            return []
         if not isinstance(body, dict):
             return []
         resources = body.get("Resources") or []
@@ -97,10 +117,13 @@ class DBpediaLinker:
         name = uri.rsplit("/resource/", 1)[-1]
         if not name or name == uri:
             return []
-        data = self._get_json(
-            f"{self.data_host}/data/{urllib.parse.quote(name)}.json",
-            {"Accept": "application/json"},
-        )
+        try:
+            data = self._get_json(
+                f"{self.data_host}/data/{urllib.parse.quote(name)}.json",
+                {"Accept": "application/json"},
+            )
+        except _ConnError:
+            return []  # dbo:type is a best-effort extra; don't fail the link over it
         if not isinstance(data, dict):
             return []
         preds = data.get(uri)
@@ -165,6 +188,8 @@ class DBpediaLinker:
         entities = list(entities)
         if not entities:
             return 0
+        with self._lock:
+            self._annotate_conn_failures = 0
 
         def _one(entity):
             try:
@@ -184,5 +209,16 @@ class DBpediaLinker:
             if link:
                 entity.dbpedia = link
                 linked += 1
+
+        # If a large share of annotate calls never reached the server, the low
+        # link count is a connectivity problem, not "nothing matched" — say so
+        # loudly, since it otherwise looks identical to a legitimate 0 result.
+        failures = self._annotate_conn_failures
+        if failures and failures >= 0.5 * len(entities):
+            logger.warning(
+                "DBpedia linking: %d/%d entities linked — %d of %d annotate request(s) "
+                "could not connect to the Spotlight server at %s. Is it running and reachable?",
+                linked, len(entities), failures, len(entities), self.spotlight_url,
+            )
         logger.info("DBpedia linking: %d/%d entities linked", linked, len(entities))
         return linked
