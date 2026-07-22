@@ -331,10 +331,10 @@ def test_over_long_entity_is_skipped_and_logged(tmp_path):
     log = (out / "skipped_entities.log").read_text(encoding="utf-8")
     assert f"ent-{long_slug}" in log
 
-    # The good entity still lists on the index; the bad one is absent.
-    index = (out / "index.html").read_text(encoding="utf-8")
-    assert "entity/ent-coffee--beverage.html" in index
-    assert f"ent-{long_slug}.html" not in index
+    # The good entity is in the search index; the bad one is absent from both.
+    ents_js = (out / "entities.js").read_text(encoding="utf-8")
+    assert "ent-coffee--beverage" in ents_js
+    assert f"ent-{long_slug}" not in ents_js
 
 
 def test_timeline_page(tmp_path):
@@ -347,3 +347,63 @@ def test_timeline_page(tmp_path):
     assert "17th century" in timeline  # the dated claim appears
     # nav link to the timeline is present on pages
     assert "timeline.html" in (tmp_path / "site" / "index.html").read_text(encoding="utf-8")
+
+
+def test_index_uses_search_index_not_flat_list(tmp_path):
+    store = _store(tmp_path)
+    out = build_site(store, tmp_path / "site")
+    store.close()
+    # Every entity lives in a compact entities.js (loaded via <script src>), not
+    # inlined into the index — so the index stays small at any scale.
+    ents = (out / "entities.js").read_text(encoding="utf-8")
+    assert ents.startswith("window.ENTITIES=")
+    assert "ent-coffee--beverage" in ents
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert 'id="ent-search"' in index and 'class="facet-bar"' in index
+    assert 'src="entities.js"' in index
+    assert 'id="entity-index"' not in index  # the old flat all-entities list is gone
+
+
+def test_disagreements_page(tmp_path):
+    store = _store(tmp_path)  # coffee 'refines' society: asserts vs disputes
+    out = build_site(store, tmp_path / "site")
+    store.close()
+    page = (out / "disagreements.html").read_text(encoding="utf-8")
+    assert "<h1>Disagreements</h1>" in page
+    assert "conflict-claims" in page
+    assert 'href="disagreements.html">Disputes</a>' in page  # nav link present
+
+
+def test_sources_page(tmp_path):
+    store = _store(tmp_path)  # one claim carries a groundedness verdict (0.90)
+    out = build_site(store, tmp_path / "site")
+    store.close()
+    page = (out / "sources.html").read_text(encoding="utf-8")
+    assert "Sources &amp; reliability" in page
+    assert "Claims per source" in page
+    assert "Judge scores — groundedness" in page
+    assert 'href="sources.html">Sources</a>' in page  # nav link present
+
+
+def test_relationship_graph_shown_only_when_connected(tmp_path):
+    store = GraphStore(tmp_path / "g.db", mode="build")
+    hub = Entity(id="ent-coffee--beverage", label="coffee", sense="beverage", mention_count=5)
+    places = [Entity(id=f"ent-{p}", label=p.title(), type="place", mention_count=2)
+              for p in ("brazil", "yemen", "london")]
+    lonely = Entity(id="ent-lonely", label="lonely", mention_count=1)
+    store.add_document(Document(id="d", text="Coffee."))
+    for i, nb in enumerate(places):  # 3 distinct neighbours -> graph shown
+        store.add_claim(
+            Claim("coffee", f"grown-in-{i}", nb.label, subject_sense="beverage",
+                  perspective=Perspective("w", "asserts", "neutral"),
+                  provenance=Provenance("d", "d#0", "coffee")), hub, nb)
+    store.finalize_entities([hub, *places, lonely])
+    store.close()
+
+    store = GraphStore(tmp_path / "g.db", mode="query")
+    out = build_site(store, tmp_path / "site")
+    store.close()
+    hub_page = (out / "entity" / "ent-coffee--beverage.html").read_text(encoding="utf-8")
+    assert "<h2>Connections</h2>" in hub_page and 'class="ego-svg"' in hub_page
+    lonely_page = (out / "entity" / "ent-lonely.html").read_text(encoding="utf-8")
+    assert "<h2>Connections</h2>" not in lonely_page  # isolated entity -> omitted

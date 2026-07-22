@@ -17,6 +17,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
 from collections import Counter
 from pathlib import Path
 
@@ -166,7 +167,7 @@ def _page(title: str, body: str, depth: int) -> str:
 <a class="brand-logo-link" href="https://trifecta.dhlab.nl" title="TRIFECTA — trifecta.dhlab.nl"><img class="brand-logo" src="{up}assets/trifecta-logo.png" alt="TRIFECTA" width="54" height="60"></a>
 <a class="brand-name" href="{up}index.html">idchkg</a></div>
 <span class="tagline">An Unflattened Identity and Change Knowledge Graph</span>
-<nav><a href="{up}index.html">Browse</a> <a href="{up}timeline.html">Timeline</a> <a href="{up}streams.html">Streams</a> <a href="{up}heatmap.html">Heatmap</a> <a href="{up}geomap.html">Map</a></nav></div></header>
+<nav><a href="{up}index.html">Browse</a> <a href="{up}timeline.html">Timeline</a> <a href="{up}streams.html">Streams</a> <a href="{up}disagreements.html">Disputes</a> <a href="{up}sources.html">Sources</a> <a href="{up}heatmap.html">Heatmap</a> <a href="{up}geomap.html">Map</a></nav></div></header>
 <main class="wrap">
 {body}
 </main>
@@ -318,7 +319,7 @@ def _render_index(graph, entities, by_key, documents) -> str:
         f'<li><a href="entity/{_esc(e.id)}.html">{_esc(e.label)}'
         f'{f" <em>({_esc(e.sense)})</em>" if e.sense else ""}</a>'
         f' <span class="count">{e.mention_count}</span></li>'
-        for e in multi
+        for e in multi[:40]
     )
     head = (
         '<section><h2>Most senses</h2>'
@@ -327,21 +328,26 @@ def _render_index(graph, entities, by_key, documents) -> str:
         f'<ul class="entity-list">{head_items}</ul></section>'
     ) if head_items else ""
 
-    # Full, searchable index (data-label drives the JS filter).
-    index_items = "".join(
-        f'<li data-label="{_esc((e.label + " " + (e.sense or "")).casefold())}">'
-        f'<a href="entity/{_esc(e.id)}.html">{_esc(e.label)}'
-        f'{f" <em>({_esc(e.sense)})</em>" if e.sense else ""}</a>'
-        f' <span class="count">{e.mention_count}</span></li>'
-        for e in entities
+    # Find-an-entity: a search box + type facets over ALL entities via a compact
+    # entities.js (loaded with <script src> so it works over file://), instead of
+    # inlining every entity — which does not scale to tens of thousands.
+    facets = "".join(
+        f'<button type="button" class="facet{" on" if t == "" else ""}" data-type="{t}">{lbl} <span></span></button>'
+        for t, lbl in (("", "All"), ("concept", "Concepts"), ("person", "People"),
+                       ("place", "Places"), ("organization", "Organizations"),
+                       ("work", "Works"), ("event", "Events"))
     )
     index = (
-        '<section><h2>All entities</h2>'
-        '<input id="filter" type="search" placeholder="Filter entities…" autocomplete="off">'
-        f'<ul id="entity-index" class="entity-list">{index_items}</ul></section>'
+        '<section><h2>Find an entity</h2>'
+        f'<div class="facet-bar" id="facets">{facets}</div>'
+        '<input id="ent-search" type="search" placeholder="Search entities…" autocomplete="off">'
+        '<ul id="ent-results" class="entity-list"></ul>'
+        '<p id="ent-more" class="muted"></p></section>'
     )
 
-    conflicts = _render_conflicts_section(graph, by_key, prefix="entity/")
+    # A short teaser of the disagreements, linking to the full page.
+    conflicts = _render_conflicts_section(graph, by_key, prefix="entity/", limit=6,
+                                          more_href="disagreements.html")
 
     doc_items = "".join(
         f'<li><a href="doc/{_esc(d.id)}.html">{_esc(d.title or d.id)}</a></li>'
@@ -361,17 +367,44 @@ def _render_index(graph, entities, by_key, documents) -> str:
         f"{overview}"
         f"{head}{index}{conflicts}{documents_section}"
     )
-    # tiny inline filter (works over file:// — no fetch)
-    body += (
-        "<script>const f=document.getElementById('filter'),"
-        "items=[...document.querySelectorAll('#entity-index li')];"
-        "f.addEventListener('input',()=>{const q=f.value.trim().toLowerCase();"
-        "for(const li of items) li.style.display=li.dataset.label.includes(q)?'':'none';});</script>"
-    )
+    # entities.js (window.ENTITIES) is loaded via <script src> so search works
+    # over file://; the inline script filters/sorts it client-side.
+    body += '<script src="entities.js"></script>' + _ENTITY_SEARCH_JS
     return _page("idchkg — knowledge graph", body, depth=0)
 
 
-def _render_conflicts_section(graph, by_key, prefix: str, limit: int = 25) -> str:
+# Client-side entity search over window.ENTITIES = [[id,label,sense,type,mentions],…].
+_ENTITY_SEARCH_JS = """<script>
+(function(){
+ var E=window.ENTITIES||[],q="",type="";
+ var results=document.getElementById('ent-results'),more=document.getElementById('ent-more'),
+     search=document.getElementById('ent-search');
+ function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+ var counts={};for(var i=0;i<E.length;i++){counts[E[i][3]]=(counts[E[i][3]]||0)+1;}
+ document.querySelectorAll('#facets .facet').forEach(function(b){
+   var t=b.dataset.type,n=t?(counts[t]||0):E.length;b.querySelector('span').textContent=n;
+   b.addEventListener('click',function(){type=t;
+     document.querySelectorAll('#facets .facet').forEach(function(x){x.classList.toggle('on',x===b);});render();});
+ });
+ function render(){
+   var ql=q.toLowerCase(),m=[];
+   for(var i=0;i<E.length;i++){var e=E[i];
+     if(type&&e[3]!==type)continue;
+     if(ql&&(e[1]+" "+e[2]).toLowerCase().indexOf(ql)<0)continue;m.push(e);}
+   m.sort(function(a,b){return b[4]-a[4];});
+   results.innerHTML=m.slice(0,50).map(function(e){
+     return '<li><a href="entity/'+e[0]+'.html">'+esc(e[1])+(e[2]?' <em>('+esc(e[2])+')</em>':'')+
+            '</a> <span class="count">'+e[4]+'</span></li>';}).join('');
+   more.textContent=m.length>50?('Showing top 50 of '+m.length+' — refine your search.'):
+     (m.length+' match'+(m.length===1?'':'es'));
+ }
+ search.addEventListener('input',function(){q=search.value.trim();render();});
+ render();
+})();
+</script>"""
+
+
+def _render_conflicts_section(graph, by_key, prefix: str, limit: int = 25, more_href: str | None = None) -> str:
     groups = graph.conflicts()
     if not groups:
         return ""
@@ -390,13 +423,168 @@ def _render_conflicts_section(graph, by_key, prefix: str, limit: int = 25) -> st
             f'<span class="pred">{_esc(head.predicate)}</span> …</div>'
             f'<ul class="conflict-claims">{rows}</ul></div>'
         )
-    more = f'<p class="muted">…and {len(groups) - limit} more.</p>' if len(groups) > limit else ""
+    if more_href:
+        more = f'<p><a href="{more_href}">See all {len(groups)} disagreements →</a></p>'
+    elif len(groups) > limit:
+        more = f'<p class="muted">…and {len(groups) - limit} more.</p>'
+    else:
+        more = ""
     return (
         '<section><h2>Disagreements</h2>'
         '<p class="muted">Claims that share a subject and predicate but differ in object or stance — '
         "disagreements a flat graph would silently reconcile.</p>"
         f'{"".join(blocks)}{more}</section>'
     )
+
+
+def _render_disagreements(graph, by_key) -> str:
+    """A dedicated page ranking the corpus's contested (subject, predicate) groups
+    — where the sources disagree (Perspective / the paper's 4th dimension)."""
+    intro = (
+        '<section class="intro"><h1>Disagreements</h1>'
+        '<p>Where the sources do not agree — claims that share a subject and predicate '
+        'but differ in their object or stance. A flat knowledge graph would silently '
+        'reconcile these; here the rival readings sit side by side, each with the voice '
+        'that makes it.</p></section>'
+    )
+    groups = graph.conflicts()
+    if not groups:
+        return _page("Disagreements — idchkg", intro + '<p class="muted">No disagreements found.</p>', depth=0)
+
+    def contention(group):
+        objects = len({(c.object, c.object_sense) for c in group})
+        stances = len({c.perspective.stance for c in group})
+        return (objects + stances, len(group))
+
+    blocks = []
+    for group in sorted(groups, key=contention, reverse=True)[:40]:
+        head = group[0]
+        subj = _entity_link(head.subject, head.subject_sense, by_key, "entity/")
+        rows = "".join(
+            f'<li>{_entity_link(c.object, c.object_sense, by_key, "entity/")} '
+            f'<span class="chip stance-{_esc(c.perspective.stance)}">{_esc(c.perspective.stance)}</span> '
+            f'<span class="src">{_esc(c.perspective.viewpoint)}</span></li>'
+            for c in group
+        )
+        blocks.append(
+            f'<div class="conflict"><div class="stmt">{subj} '
+            f'<span class="pred">{_esc(head.predicate)}</span> …</div>'
+            f'<ul class="conflict-claims">{rows}</ul></div>'
+        )
+    more = f'<p class="muted">Showing the 40 most contested of {len(groups)} groups.</p>' if len(groups) > 40 else ""
+    return _page("Disagreements — idchkg", intro + "".join(blocks) + more, depth=0)
+
+
+def _render_sources(graph, documents) -> str:
+    """A 'sources & reliability' dashboard (Challenge 3): where the claims come
+    from and how confident the judge panel was — provenance made browsable."""
+    qs = graph.quality_stats()
+    status = qs["status"]
+    total = sum(status.values()) or 1
+    ground_avg = qs["avg"].get("groundedness")
+    title_of = {d.id: (d.title or d.id) for d in documents}
+
+    tiles = _stat_tiles([
+        (len(documents), "documents"),
+        (sum(status.values()), "claims"),
+        (f'{round(100 * status.get("repaired", 0) / total)}%', "repaired"),
+        (f"{ground_avg:.2f}" if ground_avg is not None else "—", "avg groundedness"),
+    ])
+
+    figures = []
+    top_docs = sorted(qs["per_document"].items(), key=lambda kv: -kv[1])[:12]
+    if top_docs:
+        figures.append(_figure(
+            "Claims per source",
+            _bar_list([(title_of.get(d, d), n) for d, n in top_docs], "claims"),
+            "The corpus leans on a few sources — read every chart with that in mind.",
+        ))
+    for criterion, hist in sorted(qs["hist"].items()):
+        rows = [(f"{b / 10:.1f}", hist.get(b, 0)) for b in range(10)]
+        figures.append(_figure(
+            f"Judge scores — {criterion}",
+            _bar_list(rows, "claims"),
+            "How confident the judges were (0–1); accepted claims cluster high.",
+        ))
+
+    intro = (
+        '<section class="intro"><h1>Sources &amp; reliability</h1>'
+        '<p>Where these claims come from, and how much to trust them. Every claim was '
+        "checked by an LLM judge panel before it entered the graph; this page shows the "
+        "source mix and the judges' confidence.</p></section>"
+    )
+    charts = f'<div class="chart-grid">{"".join(figures)}</div>' if figures else ""
+    return _page("Sources — idchkg", intro + tiles + charts, depth=0)
+
+
+# Categorical palette (dataviz reference theme slots 1-6, CVD-validated in light
+# and dark); "Other" folds the long tail. Shared by the stream layers, the
+# relationship-graph node types, and any categorical chart.
+_SENSE_PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
+_OTHER_COLOR = "#b8b4ad"
+
+# Entity-type colours for the relationship graph (validated categorical slots).
+_TYPE_COLOR = {
+    "concept": _SENSE_PALETTE[0], "person": _SENSE_PALETTE[1], "place": _SENSE_PALETTE[2],
+    "organization": _SENSE_PALETTE[3], "work": _SENSE_PALETTE[4], "event": _SENSE_PALETTE[5],
+}
+
+
+def _ego_graph_svg(focus, neighbors, senses) -> str:
+    """A deterministic radial ego-network: `focus` centred, `neighbors`
+    [(entity, weight)] on the outer ring (colour by type, size by mentions),
+    sibling `senses` on a dashed inner ring. Inline SVG, no physics."""
+    W, H, cx, cy, Rn, Rs = 680, 460, 340.0, 230.0, 165.0, 82.0
+    max_mc = max([focus.mention_count] + [e.mention_count for e, _ in neighbors]) or 1
+    radius = lambda mc: 7 + 9 * (mc / max_mc) ** 0.5
+    color = lambda t: _TYPE_COLOR.get(t, _OTHER_COLOR)
+    trunc = lambda s: s if len(s) <= 20 else s[:19] + "…"
+
+    edges, nodes, labels = [], [], []
+    for i, e in enumerate(senses[:8]):
+        a = 2 * math.pi * i / max(len(senses[:8]), 1) - math.pi / 2
+        x, y = cx + Rs * math.cos(a), cy + Rs * math.sin(a)
+        edges.append(f'<line x1="{cx}" y1="{cy}" x2="{x:.1f}" y2="{y:.1f}" class="ego-edge ego-sense-edge"/>')
+        nodes.append(
+            f'<a href="{_esc(e.id)}.html"><circle cx="{x:.1f}" cy="{y:.1f}" r="5" class="ego-sense-node">'
+            f'<title>{_esc(e.label)} ({_esc(e.sense or "—")})</title></circle></a>'
+        )
+    n = len(neighbors)
+    for i, (e, w) in enumerate(neighbors):
+        a = 2 * math.pi * i / n - math.pi / 2
+        x, y = cx + Rn * math.cos(a), cy + Rn * math.sin(a)
+        r = radius(e.mention_count)
+        right = math.cos(a) >= 0
+        edges.append(
+            f'<line x1="{cx}" y1="{cy}" x2="{x:.1f}" y2="{y:.1f}" class="ego-edge" '
+            f'style="stroke-width:{min(1 + w / 3, 4):.1f}"/>'
+        )
+        nodes.append(
+            f'<a href="{_esc(e.id)}.html"><circle cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}" '
+            f'fill="{color(e.type)}" class="ego-node">'
+            f'<title>{_esc(e.label)} — {w} shared claim{"" if w == 1 else "s"}</title></circle></a>'
+        )
+        labels.append(
+            f'<text x="{x + (r + 4) * (1 if right else -1):.1f}" y="{y + 3:.1f}" '
+            f'text-anchor="{"start" if right else "end"}" class="ego-label">{_esc(trunc(e.label))}</text>'
+        )
+    fr = radius(focus.mention_count) + 3
+    focus_node = (
+        f'<circle cx="{cx}" cy="{cy}" r="{fr:.1f}" class="ego-focus"/>'
+        f'<text x="{cx}" y="{cy + fr + 14:.1f}" text-anchor="middle" '
+        f'class="ego-label ego-focus-label">{_esc(trunc(focus.label))}</text>'
+    )
+    present = [t for t in _TYPE_COLOR if any(e.type == t for e, _ in neighbors)]
+    legend = "".join(
+        f'<span class="leg"><span class="swatch" style="background:{_TYPE_COLOR[t]}"></span>{t.capitalize()}</span>'
+        for t in present
+    )
+    svg = (
+        f'<svg class="ego-svg" viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg" '
+        f'role="img" aria-label="Relationship graph for {_esc(focus.label)}">'
+        f'{"".join(edges)}{focus_node}{"".join(nodes)}{"".join(labels)}</svg>'
+    )
+    return f'<figure class="chart ego-fig">{svg}<div class="chart-legend">{legend}</div></figure>'
 
 
 def _short_uri(uri: str) -> str:
@@ -424,12 +612,6 @@ def _dbpedia_html(entity) -> str:
         f'<a class="dbpedia-link" href="{_esc(uri)}" title="{_esc(title)}">DBpedia ↗</a>'
         f'{chips_html}</p>'
     )
-
-
-# Categorical palette for sense layers (dataviz reference theme slots 1-6,
-# validated for CVD in both light and dark); "Other" folds the long tail.
-_SENSE_PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
-_OTHER_COLOR = "#b8b4ad"
 
 
 def _stream_graph_svg(layers, centuries) -> str:
@@ -570,6 +752,19 @@ def _render_entity(graph, entity, by_key, anchors=None, views=None) -> str:
         )
         senses_html = f'<section><h2>Other senses of “{label}”</h2><p>{links}</p></section>'
 
+    # Relationship graph (ego-network) — the entities this one is most linked to.
+    # Only for reasonably-connected entities, to keep hapax pages clean.
+    neighbors = views.neighbors(entity, limit=12)
+    connections_html = ""
+    if len(neighbors) >= 3:
+        connections_html = (
+            '<section><h2>Connections</h2>'
+            '<p class="muted">The concepts, people, and places this entity is most linked to by '
+            'claims — node size is mention count, colour is type, dashed nodes are other senses '
+            'of the same word.</p>'
+            f'{_ego_graph_svg(entity, neighbors, senses)}</section>'
+        )
+
     # Defining properties at a glance.
     profile = views.identity_profile(entity)
     props = profile["properties"]
@@ -625,21 +820,23 @@ def _render_entity(graph, entity, by_key, anchors=None, views=None) -> str:
         conflicts_html = f'<section><h2>Disagreements</h2>{"".join(blocks)}</section>'
 
     # (Stream graphs live on the dedicated /streams.html page, not per entity.)
-    body = header + senses_html + props_html + perspectives + drift_html + conflicts_html
+    body = header + senses_html + connections_html + props_html + perspectives + drift_html + conflicts_html
     return _page(f"{entity.label} — idchkg", body, depth=1)
 
 
 def _render_heatmap(graph, entities, by_key) -> str:
-    """A heatmap page: entities as tiles coloured by mention frequency."""
+    """A heatmap page: the most-mentioned entities as tiles coloured by frequency
+    (capped, so it stays legible on very large graphs)."""
     if not entities:
         return _page("Heatmap — idchkg", '<p class="muted">No entities.</p>', depth=0)
 
+    entities = sorted(entities, key=lambda e: -e.mention_count)[:150]
     max_count = max(e.mention_count for e in entities)
     min_count = min(e.mention_count for e in entities)
     span = max(max_count - min_count, 1)
 
     tiles = []
-    for e in sorted(entities, key=lambda e: -e.mention_count):
+    for e in entities:
         t = (e.mention_count - min_count) / span  # 0..1, 1 = hottest
         sense = f' <em>({_esc(e.sense)})</em>' if e.sense else ""
         tiles.append(
@@ -906,11 +1103,11 @@ def _render_geomap(graph, entities, by_key) -> str:
             f'<li><a href="entity/{_esc(e.id)}.html">{_esc(e.label)}'
             f'{f" <em>({_esc(e.sense)})</em>" if e.sense else ""}</a>'
             f' <span class="count">{e.mention_count}</span></li>'
-            for e in sorted(unresolved, key=lambda e: -e.mention_count)
+            for e in sorted(unresolved, key=lambda e: -e.mention_count)[:100]
         )
         unresolved_html = (
             '<section><h2>Unmapped places</h2>'
-            '<p class="muted">Place entities not matched to known coordinates.</p>'
+            f'<p class="muted">Place entities not matched to known coordinates (top {min(len(unresolved), 100)} of {len(unresolved)}).</p>'
             f'<ul class="entity-list">{items}</ul></section>'
         )
 
@@ -985,9 +1182,19 @@ def build_site(graph, out_dir: str | Path) -> Path:
     anchors = _claim_anchors(graph, documents)
 
     (out / "style.css").write_text(_CSS, encoding="utf-8")
+    # Compact search index for every entity (loaded via <script src>, so the
+    # index page's search works over file:// without inlining tens of thousands.
+    (out / "entities.js").write_text(
+        "window.ENTITIES=" + json.dumps(
+            [[e.id, e.label, e.sense or "", e.type or "", e.mention_count] for e in entities],
+            ensure_ascii=False, separators=(",", ":")) + ";",
+        encoding="utf-8",
+    )
     (out / "index.html").write_text(_render_index(graph, entities, by_key, documents), encoding="utf-8")
     (out / "timeline.html").write_text(_render_timeline(graph, by_key, anchors), encoding="utf-8")
     (out / "streams.html").write_text(_render_streams(graph), encoding="utf-8")
+    (out / "disagreements.html").write_text(_render_disagreements(graph, by_key), encoding="utf-8")
+    (out / "sources.html").write_text(_render_sources(graph, documents), encoding="utf-8")
     (out / "heatmap.html").write_text(_render_heatmap(graph, entities, by_key), encoding="utf-8")
     (out / "geomap.html").write_text(_render_geomap(graph, entities, by_key), encoding="utf-8")
     for entity in entities:
@@ -1118,6 +1325,27 @@ figure.chart{margin:0;background:var(--panel);border:1px solid var(--line);borde
 .stream-fig{padding:16px}
 .stream-svg{width:100%;max-width:640px;display:block;margin:.2em auto}
 .stream-axis{font-size:10px;fill:var(--muted)}
+/* find: search + type facets */
+.facet-bar{display:flex;flex-wrap:wrap;gap:6px;margin:.5em 0}
+.facet{font-size:.8rem;padding:4px 11px;border-radius:999px;border:1px solid var(--line);
+  background:var(--panel);color:var(--ink);cursor:pointer}
+.facet span{color:var(--muted);font-size:.72rem}
+.facet.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.facet.on span{color:#e6f3f1}
+#ent-search{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;
+  font-size:1rem;margin:.5em 0 1em;background:var(--panel)}
+#ent-more{font-size:.82rem}
+/* relationship (ego) graph */
+.ego-fig{padding:8px}
+.ego-svg{width:100%;max-width:680px;display:block;margin:0 auto}
+.ego-edge{stroke:var(--line)}
+.ego-sense-edge{stroke-dasharray:3 3}
+.ego-node{stroke:#fff;stroke-width:1.5;cursor:pointer}
+.ego-node:hover{stroke:var(--ink)}
+.ego-sense-node{fill:var(--panel);stroke:var(--accent);stroke-width:1.5;stroke-dasharray:2 2;cursor:pointer}
+.ego-focus{fill:var(--accent);stroke:#fff;stroke-width:2}
+.ego-label{font-size:11px;fill:var(--ink)}
+.ego-focus-label{font-weight:700}
 input#filter{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;
   font-size:1rem;margin:.4em 0 1em;background:var(--panel)}
 ul.entity-list{list-style:none;padding:0;margin:0;columns:2;column-gap:32px}

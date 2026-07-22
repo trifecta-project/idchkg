@@ -185,6 +185,56 @@ class KnowledgeGraph:
                         per_sense[entity.sense][(year // 100) * 100] += 1
         return {sense: dict(counts) for sense, counts in per_sense.items() if counts}
 
+    def neighbors(self, entity: Entity, limit: int = 12) -> list[tuple[Entity, int]]:
+        """The entities most connected to `entity` by shared claims — `(entity,
+        weight)` pairs, heaviest first. Feeds the relationship (ego) graph. Runs
+        over whatever graph it's called on (the whole graph, or a GraphStore
+        per-entity subgraph), so cost tracks the subgraph size."""
+        from collections import Counter
+
+        weight: Counter = Counter()
+        for subj_id, obj_id in self._entity_of_claim.values():
+            if entity.id == subj_id and obj_id != entity.id:
+                weight[obj_id] += 1
+            elif entity.id == obj_id and subj_id != entity.id:
+                weight[subj_id] += 1
+        out = []
+        for nid, w in weight.most_common(limit):
+            neighbor = self._entities.get(nid)
+            if neighbor is not None:
+                out.append((neighbor, w))
+        return out
+
+    def quality_stats(self) -> dict:
+        """Provenance + judge-quality aggregates (Challenge 3): claims per source
+        document, accepted/repaired status split, and a judge-score histogram
+        (0.0–1.0 in tenths) per criterion with per-criterion averages."""
+        from collections import Counter, defaultdict
+
+        per_document: Counter = Counter()
+        status: Counter = Counter()
+        hist: dict = defaultdict(Counter)
+        ssum: dict = defaultdict(float)
+        scount: dict = defaultdict(int)
+        for claim in self._claims.values():
+            status[claim.status] += 1
+            prov = claim.provenance
+            if not prov:
+                continue
+            if prov.document_id:
+                per_document[prov.document_id] += 1
+            for verdict in prov.verdicts:
+                bucket = min(int(verdict.score * 10), 9)
+                hist[verdict.criterion][bucket] += 1
+                ssum[verdict.criterion] += verdict.score
+                scount[verdict.criterion] += 1
+        return {
+            "per_document": dict(per_document),
+            "status": dict(status),
+            "hist": {k: dict(v) for k, v in hist.items()},
+            "avg": {k: ssum[k] / scount[k] for k in scount},
+        }
+
     def documents(self) -> list[Document]:
         return list(self._documents.values())
 

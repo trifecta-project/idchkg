@@ -591,6 +591,35 @@ class GraphStore:
             out.setdefault(r["sense"], {})[r["century"]] = r["n"]
         return out
 
+    def quality_stats(self) -> dict:
+        """Provenance + judge-quality aggregates (Challenge 3): claims per source
+        document and status split via SQL, plus a judge-score histogram per
+        criterion from one pass over the verdicts JSON."""
+        from collections import Counter, defaultdict
+
+        per_document = dict(self.conn.execute(
+            "SELECT document_id, COUNT(*) FROM claims WHERE document_id IS NOT NULL GROUP BY document_id"))
+        status = dict(self.conn.execute("SELECT status, COUNT(*) FROM claims GROUP BY status"))
+        hist: dict = defaultdict(Counter)
+        ssum: dict = defaultdict(float)
+        scount: dict = defaultdict(int)
+        for (verdicts,) in self.conn.execute(
+            "SELECT verdicts FROM claims WHERE verdicts IS NOT NULL AND verdicts<>'[]'"
+        ):
+            for v in json.loads(verdicts):
+                score, criterion = v.get("score"), v.get("criterion")
+                if score is None or criterion is None:
+                    continue
+                hist[criterion][min(int(score * 10), 9)] += 1
+                ssum[criterion] += score
+                scount[criterion] += 1
+        return {
+            "per_document": per_document,
+            "status": status,
+            "hist": {k: dict(v) for k, v in hist.items()},
+            "avg": {k: ssum[k] / scount[k] for k in scount},
+        }
+
     def documents(self) -> list[Document]:
         return [
             Document(id=r["id"], text=r["text"] or "", title=r["title"] or "",
