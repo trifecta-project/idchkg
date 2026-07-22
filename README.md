@@ -30,16 +30,21 @@ Extraction is done by an LLM, and every extracted claim is reviewed by
 ## Pipeline
 
 ```
-ingest → chunk → extract (LLM) → judge (LLM panel) → repair (LLM, judge-guided)
-       → resolve entities → in-memory graph (networkx)
+ingest → chunk → extract (LLM) → judge (LLM panel) → repair (LLM, ≤1 round)
+       → resolve entities → [link to DBpedia] → knowledge graph
 ```
+
+Chunks are processed **concurrently** (`--concurrency`), but every accepted
+claim is applied to the shared graph on a single thread in document/chunk order,
+so the resulting graph is **deterministic** regardless of concurrency
+(`src/idchkg/pipeline.py`).
 
 - **Extract** — an LLM turns each chunk into entities and qualified claims,
   with a verbatim supporting quote (`src/idchkg/extract.py`).
 - **Judge** — two independent LLM judges score each claim
   (`src/idchkg/judge.py`):
   - **groundedness** — is the claim actually stated by the passage? A failure
-    means hallucination → the claim is **rejected**.
+    means hallucination → the claim is **rejected** (unrepairable).
   - **qualifier fidelity** — are the perspective/time/quote faithful? A failure
     → the claim is sent back for **one judge-guided repair round**, then
     re-judged.
@@ -47,17 +52,32 @@ ingest → chunk → extract (LLM) → judge (LLM panel) → repair (LLM, judge-
   of a word stay distinct and are linked by near-identity; the resolver
   deliberately under-merges, since a wrong merge is silent and destructive
   (`src/idchkg/resolve.py`).
-- **Graph** — an in-memory `networkx.MultiDiGraph` where claims are nodes, so
-  the same two entities can be linked by many claims from different viewpoints
-  and times without collapsing them (`src/idchkg/graph.py`).
+- **Link** *(optional, `--link-dbpedia`)* — each resolved entity is linked to
+  its DBpedia resource via Spotlight (context-aware), after resolve and before
+  the entities are finalized (`src/idchkg/link.py`; see
+  [Link entities to DBpedia](#link-entities-to-dbpedia)).
+- **Graph** — claims are reified as **nodes**, so the same two entities can be
+  linked by many claims from different viewpoints and times without collapsing
+  them. The target is either an in-memory `networkx.MultiDiGraph`
+  (`src/idchkg/graph.py`) or, for large corpora, a **streaming SQLite store**
+  that writes claims straight to `graph.db` under bounded memory
+  (`--store sqlite`, `src/idchkg/store.py`).
 
 Every claim carries its judges' verdicts in its provenance, so the graph is
 auditable: you can always ask *why* a claim is in (or out of) the graph.
 
-## Runs locally, in memory
+## Runs locally
 
-- The graph lives in memory (networkx); persistence is plain JSON, plus
-  GraphML and reified-statement Turtle/RDF export.
+- **Storage** — two paths over one SQLite schema (`src/idchkg/store.py`):
+  - `--store memory` (default) builds the graph in RAM (networkx) and writes
+    `graph.json`, `graph.graphml`, reified-statement `graph.ttl`, and `graph.db`.
+  - `--store sqlite` streams claims straight to `graph.db` under bounded memory
+    and writes only `graph.db` — so large corpora don't have to fit in RAM.
+
+  Either way `graph.db` carries an **FTS5** chunk index for BM25 retrieval
+  (`idchkg search`), and a `.db` graph is **queried via SQL** without loading it
+  in full. Both runs also emit a `report.json` with run stats and every rejected
+  claim.
 - **Backends** (`--backend`):
   - `ollama` — a fully local model via [Ollama](https://ollama.com) on
     `localhost:11434` (no cloud, no key).
