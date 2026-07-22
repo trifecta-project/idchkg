@@ -566,6 +566,31 @@ class GraphStore:
         viewpoints = self.conn.execute("SELECT COUNT(DISTINCT viewpoint) FROM claims").fetchone()[0]
         return {"stance": stance, "sentiment": sentiment, "viewpoints": viewpoints}
 
+    def senses_over_time(self, labels) -> dict:
+        """Dated-claim counts per sense per century for a concept, via a single
+        SQL GROUP BY (scales to large graphs). `{sense: {century: count}}` keyed
+        by century start-year (1600 = the 1600s). `labels` is a single label or a
+        list to **collapse** into one concept (senses pooled). Uses the normalised
+        `valid_from` year clamped to a plausible window."""
+        if isinstance(labels, str):
+            labels = [labels]
+        if not labels:
+            return {}
+        placeholders = ",".join("?" * len(labels))
+        rows = self.conn.execute(
+            "SELECT e.sense AS sense, "
+            "(CAST(substr(cl.valid_from,1,4) AS INTEGER)/100)*100 AS century, COUNT(*) AS n "
+            "FROM claims cl JOIN entities e ON (cl.subject_id=e.id OR cl.object_id=e.id) "
+            f"WHERE LOWER(e.label) IN ({placeholders}) AND e.sense<>'' AND cl.valid_from IS NOT NULL "
+            "AND CAST(substr(cl.valid_from,1,4) AS INTEGER) BETWEEN 1300 AND 2025 "
+            "GROUP BY e.sense, century",
+            tuple(label.lower() for label in labels),
+        ).fetchall()
+        out: dict = {}
+        for r in rows:
+            out.setdefault(r["sense"], {})[r["century"]] = r["n"]
+        return out
+
     def documents(self) -> list[Document]:
         return [
             Document(id=r["id"], text=r["text"] or "", title=r["title"] or "",

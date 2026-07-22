@@ -29,6 +29,19 @@ import networkx as nx
 
 from .models import Claim, Document, Entity, EvolutionEvent, IdentityLink, slugify
 
+# Plausible year window for temporal binning; drops mis-normalised outliers
+# (some corpora carry stray years like 0575 or a century-1 artefact).
+_MIN_YEAR, _MAX_YEAR = 1300, 2025
+
+
+def _valid_from_year(valid_from) -> int | None:
+    """The 4-digit year from a normalised ``valid_from`` (e.g. ``1830-01-01``),
+    or ``None`` when absent/implausible. Shared by the senses-over-time views."""
+    if not valid_from or len(valid_from) < 4 or not valid_from[:4].isdigit():
+        return None
+    year = int(valid_from[:4])
+    return year if _MIN_YEAR <= year <= _MAX_YEAR else None
+
 
 class KnowledgeGraph:
     def __init__(self):
@@ -147,6 +160,30 @@ class KnowledgeGraph:
             sentiment[c.perspective.sentiment] += 1
             viewpoints.add(c.perspective.viewpoint)
         return {"stance": dict(stance), "sentiment": dict(sentiment), "viewpoints": len(viewpoints)}
+
+    def senses_over_time(self, labels) -> dict:
+        """Dated-claim counts per sense per century for a concept, `{sense:
+        {century_start_year: count}}` (e.g. 1600 = the 1600s). `labels` is a
+        single label or a list of labels to **collapse** into one concept (their
+        senses are pooled). Feeds the 'senses over time' stream graph (Challenge
+        1 identity × Challenge 2 change). Uses the normalised `valid_from` year
+        only, clamped to a plausible window, mirroring the GraphStore SQL path."""
+        from collections import Counter, defaultdict
+
+        if isinstance(labels, str):
+            labels = [labels]
+        per_sense: dict = defaultdict(Counter)
+        seen: set = set()  # a shared entity (e.g. via aliases) is counted once
+        for label in labels:
+            for entity in self.senses_of(label):
+                if not entity.sense or entity.id in seen:
+                    continue
+                seen.add(entity.id)
+                for claim in self.claims_about(entity):
+                    year = _valid_from_year(claim.time.valid_from)
+                    if year is not None:
+                        per_sense[entity.sense][(year // 100) * 100] += 1
+        return {sense: dict(counts) for sense, counts in per_sense.items() if counts}
 
     def documents(self) -> list[Document]:
         return list(self._documents.values())

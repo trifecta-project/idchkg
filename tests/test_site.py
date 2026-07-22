@@ -112,6 +112,56 @@ def test_overview_omits_senses_chart_when_no_senses(tmp_path):
     assert "Mention frequency" in index                  # long tail always shown
 
 
+def test_streams_page_collapses_labels_and_omits_thin_concepts(tmp_path):
+    store = GraphStore(tmp_path / "g.db", mode="build")
+    # 'coffee' concept collapses coffee + roasted coffee: two labels -> pooled
+    # senses (beverage in the 1600s, product in the 1800s).
+    bev = Entity(id="ent-coffee--beverage", label="coffee", sense="beverage", mention_count=5)
+    prod = Entity(id="ent-roasted--product", label="roasted coffee", sense="product", mention_count=5)
+    tea = Entity(id="ent-tea", label="tea", sense="beverage", mention_count=1)  # single sense -> omitted
+    obj = Entity(id="ent-x", label="x")
+    store.add_document(Document(id="d", text="Coffee."))
+    for i in range(5):
+        store.add_claim(
+            Claim("coffee", f"p{i}", "x", subject_sense="beverage",
+                  perspective=Perspective("w", "asserts", "neutral"),
+                  time=TemporalScope(valid_from="1650-01-01"),
+                  provenance=Provenance("d", "d#0", "coffee")), bev, obj)
+    for i in range(5):
+        store.add_claim(
+            Claim("roasted coffee", f"g{i}", "x", subject_sense="product",
+                  perspective=Perspective("w", "asserts", "neutral"),
+                  time=TemporalScope(valid_from="1850-01-01"),
+                  provenance=Provenance("d", "d#0", "roasted")), prod, obj)
+    store.add_claim(
+        Claim("tea", "is", "x", subject_sense="beverage",
+              perspective=Perspective("w", "asserts", "neutral"),
+              time=TemporalScope(valid_from="1800-01-01"),
+              provenance=Provenance("d", "d#0", "tea")), tea, obj)
+    store.finalize_entities([bev, prod, tea, obj])
+    store.close()
+
+    store = GraphStore(tmp_path / "g.db", mode="query")
+    out = build_site(store, tmp_path / "site")
+    store.close()
+
+    streams = (out / "streams.html").read_text(encoding="utf-8")
+    # Coffee renders (collapse pooled two labels' senses across two centuries).
+    assert "<h3>Coffee</h3>" in streams
+    assert 'class="stream-svg"' in streams
+    assert "beverage 5" in streams and "product 5" in streams
+    assert ">1600s</text>" in streams and ">1800s</text>" in streams
+    # Thin concept (tea: one sense) is omitted; nutmeg (absent) too.
+    assert "<h3>Tea</h3>" not in streams
+    assert "<h3>Nutmeg</h3>" not in streams
+
+    # Nav link is present; stream no longer appears on the entity page.
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert 'href="streams.html">Streams</a>' in index
+    entity = (out / "entity" / "ent-coffee--beverage.html").read_text(encoding="utf-8")
+    assert "Senses over time" not in entity
+
+
 def test_geomap_is_zoomable(tmp_path):
     store = GraphStore(tmp_path / "g.db", mode="build")
     brazil = Entity(id="ent-brazil", label="Brazil", type="place", mention_count=5)

@@ -166,7 +166,7 @@ def _page(title: str, body: str, depth: int) -> str:
 <a class="brand-logo-link" href="https://trifecta.dhlab.nl" title="TRIFECTA — trifecta.dhlab.nl"><img class="brand-logo" src="{up}assets/trifecta-logo.png" alt="TRIFECTA" width="54" height="60"></a>
 <a class="brand-name" href="{up}index.html">idchkg</a></div>
 <span class="tagline">An Unflattened Identity and Change Knowledge Graph</span>
-<nav><a href="{up}index.html">Browse</a> <a href="{up}timeline.html">Timeline</a> <a href="{up}heatmap.html">Heatmap</a> <a href="{up}geomap.html">Map</a></nav></div></header>
+<nav><a href="{up}index.html">Browse</a> <a href="{up}timeline.html">Timeline</a> <a href="{up}streams.html">Streams</a> <a href="{up}heatmap.html">Heatmap</a> <a href="{up}geomap.html">Map</a></nav></div></header>
 <main class="wrap">
 {body}
 </main>
@@ -426,6 +426,119 @@ def _dbpedia_html(entity) -> str:
     )
 
 
+# Categorical palette for sense layers (dataviz reference theme slots 1-6,
+# validated for CVD in both light and dark); "Other" folds the long tail.
+_SENSE_PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
+_OTHER_COLOR = "#b8b4ad"
+
+
+def _stream_graph_svg(layers, centuries) -> str:
+    """A stream graph (stacked areas, centred baseline) — inline SVG, zero-dep.
+    `layers`: [(name, values_aligned_to_centuries, total, colour)]; `centuries`:
+    sorted century start-years. Layer identity carried by the legend + per-band
+    hover, never colour alone."""
+    W, H, padL, padR, padT, padB = 640, 250, 30, 30, 18, 26
+    n = len(centuries)
+    plot_w, plot_h = W - padL - padR, H - padT - padB
+    center_y = padT + plot_h / 2
+    xs = [padL + (plot_w * i / (n - 1) if n > 1 else plot_w / 2) for i in range(n)]
+    totals = [sum(layer[1][i] for layer in layers) for i in range(n)]
+    y_scale = plot_h / (max(totals) or 1)
+
+    paths = []
+    running = [-t / 2 for t in totals]  # centred baseline (silhouette)
+    for name, vals, total, colour in layers:
+        upper = [running[i] + vals[i] for i in range(n)]
+        top = [(xs[i], center_y - upper[i] * y_scale) for i in range(n)]
+        bottom = [(xs[i], center_y - running[i] * y_scale) for i in range(n)]
+        pts = top + bottom[::-1]
+        d = "M" + " L".join(f"{x:.1f},{y:.1f}" for x, y in pts) + " Z"
+        paths.append(
+            f'<path d="{d}" fill="{colour}" fill-opacity="0.9">'
+            f'<title>{_esc(name)}: {total}</title></path>'
+        )
+        running = upper
+
+    axis = "".join(
+        f'<text x="{xs[i]:.0f}" y="{H - 8}" class="stream-axis" text-anchor="middle">{c}s</text>'
+        for i, c in enumerate(centuries)
+    )
+    return (
+        f'<svg class="stream-svg" viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg" '
+        f'role="img" aria-label="Senses over time stream graph">{"".join(paths)}{axis}</svg>'
+    )
+
+
+# Curated set of concepts for the streams page, in display order. Each concept
+# maps to one or more labels that are **collapsed** (pooled) into it — the way
+# near-synonym extractions ("coffee bean(s)", "roasted coffee") rejoin one
+# concept. Corpus-specific and easily edited; concepts without enough dated,
+# multi-sense claims are simply omitted from the page.
+_STREAM_CONCEPTS = [
+    ("Coffee", ["coffee", "roasted coffee", "coffee beans", "coffee bean"]),
+    ("Tea", ["tea"]),
+    ("Chocolate", ["chocolate", "cocoa"]),
+    ("Tobacco", ["tobacco"]),
+    ("Sugar", ["sugar"]),
+    ("Cinnamon", ["cinnamon"]),
+    ("Nutmeg", ["nutmeg"]),
+]
+
+
+def _stream_block(title: str, sot: dict) -> str:
+    """One titled stream graph for a concept, or '' when too sparse to be legible
+    (so the concept is omitted). `sot`: {sense: {century: count}}."""
+    totals = {s: sum(cs.values()) for s, cs in sot.items()}
+    senses = [s for s, t in totals.items() if t > 0]
+    centuries = sorted({c for cs in sot.values() for c in cs})
+    # Need at least two senses, two time points, and a little data to be legible.
+    if len(senses) < 2 or len(centuries) < 2 or sum(totals.values()) < 8:
+        return ""
+
+    ranked = sorted(senses, key=lambda s: -totals[s])
+    top, rest = ranked[:6], ranked[6:]
+    layers = [
+        (s, [sot[s].get(c, 0) for c in centuries], totals[s], _SENSE_PALETTE[i])
+        for i, s in enumerate(top)
+    ]
+    if rest:
+        layers.append((
+            "other",
+            [sum(sot[s].get(c, 0) for s in rest) for c in centuries],
+            sum(totals[s] for s in rest),
+            _OTHER_COLOR,
+        ))
+
+    legend = "".join(
+        f'<span class="leg"><span class="swatch" style="background:{col}"></span>{_esc(name)} {tot}</span>'
+        for name, _, tot, col in layers
+    )
+    return (
+        f'<section class="stream-block"><h3>{_esc(title)}</h3>'
+        f'<figure class="chart stream-fig">{_stream_graph_svg(layers, centuries)}'
+        f'<div class="chart-legend">{legend}</div></figure></section>'
+    )
+
+
+def _render_streams(graph) -> str:
+    """A dedicated page of stream graphs for the curated `_STREAM_CONCEPTS` —
+    each concept's senses over time, one river per concept."""
+    intro = (
+        '<section class="intro"><h1>Senses over time</h1>'
+        '<p>How a handful of commodity concepts split into <em>senses</em> that '
+        'rise and fall across the centuries — each band a sense, its thickness the '
+        'number of dated claims. Concepts whose near-synonym labels fragment the '
+        'extraction (e.g. <em>coffee</em>, <em>roasted coffee</em>, <em>coffee '
+        'beans</em>) are collapsed into one.</p></section>'
+    )
+    blocks = [b for name, labels in _STREAM_CONCEPTS if (b := _stream_block(name, graph.senses_over_time(labels)))]
+    body = intro + (
+        "".join(blocks) if blocks
+        else '<p class="muted">No stream data for the selected concepts in this corpus.</p>'
+    )
+    return _page("Senses over time — idchkg", body, depth=0)
+
+
 def _render_entity(graph, entity, by_key, anchors=None, views=None) -> str:
     # `views` is this entity's view source (its claim subgraph), built once by the
     # caller and reused for all four entity-scoped views below instead of being
@@ -511,6 +624,7 @@ def _render_entity(graph, entity, by_key, anchors=None, views=None) -> str:
             )
         conflicts_html = f'<section><h2>Disagreements</h2>{"".join(blocks)}</section>'
 
+    # (Stream graphs live on the dedicated /streams.html page, not per entity.)
     body = header + senses_html + props_html + perspectives + drift_html + conflicts_html
     return _page(f"{entity.label} — idchkg", body, depth=1)
 
@@ -873,6 +987,7 @@ def build_site(graph, out_dir: str | Path) -> Path:
     (out / "style.css").write_text(_CSS, encoding="utf-8")
     (out / "index.html").write_text(_render_index(graph, entities, by_key, documents), encoding="utf-8")
     (out / "timeline.html").write_text(_render_timeline(graph, by_key, anchors), encoding="utf-8")
+    (out / "streams.html").write_text(_render_streams(graph), encoding="utf-8")
     (out / "heatmap.html").write_text(_render_heatmap(graph, entities, by_key), encoding="utf-8")
     (out / "geomap.html").write_text(_render_geomap(graph, entities, by_key), encoding="utf-8")
     for entity in entities:
@@ -998,6 +1113,11 @@ figure.chart{margin:0;background:var(--panel);border:1px solid var(--line);borde
 .chart-legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:.7em;font-size:.78rem;color:var(--muted)}
 .leg{display:inline-flex;align-items:center;gap:5px}
 .swatch{width:11px;height:11px;border-radius:3px;display:inline-block}
+.stream-block{margin:1.8em 0}
+.stream-block h3{font-size:1.15rem;margin:0 0 .5em}
+.stream-fig{padding:16px}
+.stream-svg{width:100%;max-width:640px;display:block;margin:.2em auto}
+.stream-axis{font-size:10px;fill:var(--muted)}
 input#filter{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;
   font-size:1rem;margin:.4em 0 1em;background:var(--panel)}
 ul.entity-list{list-style:none;padding:0;margin:0;columns:2;column-gap:32px}
