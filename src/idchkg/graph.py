@@ -177,6 +177,13 @@ class KnowledgeGraph:
             if entity.id in (s, o)
         ]
 
+    def subgraph_of(self, entity: Entity) -> "KnowledgeGraph":
+        """The graph on which this entity's views run. For the in-memory graph
+        that's the graph itself (its views already filter to the entity) — the
+        method exists so callers can build a per-entity view source once and
+        share it across views, matching GraphStore's DB-backed subgraph."""
+        return self
+
     # ------------------------------------------- Challenge 1: identity
 
     def senses_of(self, label: str) -> list[Entity]:

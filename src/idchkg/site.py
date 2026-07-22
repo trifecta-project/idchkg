@@ -47,12 +47,21 @@ def _key(label: str, sense: str) -> tuple[str, str]:
     return (label.strip().casefold(), (sense or "").strip().casefold())
 
 
+# Canonical label -> [entities with that label]. Populated once per build_site
+# run so _entity_link's "one sense, no sense given" cross-link and the entity
+# page's sense switcher are O(1) instead of scanning all entities per lookup
+# (the render hot path — millions of scans on a 50K-entity graph).
+_BY_LABEL: dict[str, list] = {}
+
+
 def _entity_link(label: str, sense: str, by_key: dict, prefix: str) -> str:
     """Cross-link an endpoint label to its entity page when resolvable, keyed by
     (canonical label, sense) as the resolver does; else plain text."""
-    entity = by_key.get(_key(label, sense))
+    key = _key(label, sense)
+    entity = by_key.get(key)
     if entity is None and not (sense or "").strip():
-        candidates = [e for (lbl, _), e in by_key.items() if lbl == _key(label, sense)[0]]
+        # A bare label with no sense links to its entity only when unambiguous.
+        candidates = _BY_LABEL.get(key[0], ())
         if len(candidates) == 1:
             entity = candidates[0]
     if entity is not None:
@@ -303,7 +312,13 @@ def _dbpedia_html(entity) -> str:
     )
 
 
-def _render_entity(graph, entity, by_key, anchors=None) -> str:
+def _render_entity(graph, entity, by_key, anchors=None, views=None) -> str:
+    # `views` is this entity's view source (its claim subgraph), built once by the
+    # caller and reused for all four entity-scoped views below instead of being
+    # rebuilt per view — the difference between a full claims scan x4 per entity
+    # and a single indexed lookup. Falls back to building it here if not passed.
+    if views is None:
+        views = graph.subgraph_of(entity)
     prefix = ""  # sibling entity pages live in the same entity/ directory
     label = _esc(entity.label)
     sub = f'<span class="sense">{_esc(entity.sense)}</span>' if entity.sense else '<span class="sense muted">unspecified sense</span>'
@@ -318,7 +333,8 @@ def _render_entity(graph, entity, by_key, anchors=None) -> str:
     header += "</section>"
 
     # Sense switcher (Challenge 1: identity) — sibling senses of the same label.
-    senses = [e for e in graph.senses_of(entity.label) if e.id != entity.id]
+    # From the prebuilt label index (O(1)); only pages that exist, so no dead links.
+    senses = [e for e in _BY_LABEL.get(_key(entity.label, "")[0], ()) if e.id != entity.id]
     senses_html = ""
     if senses:
         links = " ".join(
@@ -328,7 +344,7 @@ def _render_entity(graph, entity, by_key, anchors=None) -> str:
         senses_html = f'<section><h2>Other senses of “{label}”</h2><p>{links}</p></section>'
 
     # Defining properties at a glance.
-    profile = graph.identity_profile(entity)
+    profile = views.identity_profile(entity)
     props = profile["properties"]
     props_html = ""
     if props:
@@ -336,7 +352,7 @@ def _render_entity(graph, entity, by_key, anchors=None) -> str:
         props_html = f'<section><h2>Defining properties</h2><ul class="props">{rows}</ul></section>'
 
     # Perspectives — the centrepiece.
-    grouped = graph.perspectives_on(entity)
+    grouped = views.perspectives_on(entity)
     persp_cards = ""
     for viewpoint, claims in sorted(grouped.items(), key=lambda kv: (-len(kv[1]), kv[0])):
         claim_lis = "".join(_claim_html(c, by_key, prefix, doc_prefix="../doc/", anchors=anchors) for c in claims)
@@ -353,7 +369,7 @@ def _render_entity(graph, entity, by_key, anchors=None) -> str:
     )
 
     # Change over time (Challenge 2) as a small visual timeline, when dated.
-    drift = [b for b in graph.drift(entity) if b["when"] and b["when"] != "undated"]
+    drift = [b for b in views.drift(entity) if b["when"] and b["when"] != "undated"]
     drift_html = ""
     if drift:
         items = "".join(
@@ -364,7 +380,7 @@ def _render_entity(graph, entity, by_key, anchors=None) -> str:
         drift_html = f'<section><h2>Change over time</h2><div class="timeline-viz">{items}</div></section>'
 
     # Conflicts involving this entity.
-    groups = graph.conflicts(entity)
+    groups = views.conflicts(entity)
     conflicts_html = ""
     if groups:
         blocks = []
@@ -711,6 +727,12 @@ def build_site(graph, out_dir: str | Path) -> Path:
     entities = [e for e in all_entities if not _filename_too_long(e)]
     skipped = [e for e in all_entities if _filename_too_long(e)]
     by_key = {_key(e.label, e.sense): e for e in entities}
+    # Group entities by canonical label once, so cross-links and the sense
+    # switcher resolve in O(1) instead of scanning all entities per lookup.
+    global _BY_LABEL
+    _BY_LABEL = {}
+    for e in entities:
+        _BY_LABEL.setdefault(_key(e.label, e.sense)[0], []).append(e)
     documents = sorted(graph.documents(), key=lambda d: (d.title or d.id).casefold())
 
     if skipped:
@@ -740,8 +762,11 @@ def build_site(graph, out_dir: str | Path) -> Path:
     (out / "heatmap.html").write_text(_render_heatmap(graph, entities, by_key), encoding="utf-8")
     (out / "geomap.html").write_text(_render_geomap(graph, entities, by_key), encoding="utf-8")
     for entity in entities:
+        # Build this entity's claim subgraph once and reuse it for all four
+        # entity-scoped views (was rebuilt per view — a full claims scan x4).
+        sub = graph.subgraph_of(entity)
         (out / "entity" / f"{entity.id}.html").write_text(
-            _render_entity(graph, entity, by_key, anchors), encoding="utf-8"
+            _render_entity(graph, entity, by_key, anchors, views=sub), encoding="utf-8"
         )
     for doc in documents:
         (out / "doc" / f"{doc.id}.html").write_text(

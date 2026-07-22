@@ -79,6 +79,15 @@ CREATE VIRTUAL TABLE chunks_fts USING fts5(
 );
 """
 
+# Indexes for the per-entity / per-document claim lookups the query views and the
+# site generator do (subject_id/object_id per entity, document_id per doc). Kept
+# separate from _SCHEMA so they can also be applied to already-built .db files.
+_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_claims_subject ON claims(subject_id);
+CREATE INDEX IF NOT EXISTS idx_claims_object ON claims(object_id);
+CREATE INDEX IF NOT EXISTS idx_claims_document ON claims(document_id);
+"""
+
 
 def save_sqlite(kg: KnowledgeGraph, path: str | Path) -> None:
     """Write the whole graph + an FTS5 chunk index to a fresh SQLite file."""
@@ -144,6 +153,7 @@ def save_sqlite(kg: KnowledgeGraph, path: str | Path) -> None:
                     "INSERT INTO chunks_fts (chunk_id, document_id, text) VALUES (?,?,?)",
                     (chunk.id, chunk.document_id, chunk.text),
                 )
+        conn.executescript(_INDEXES)  # after bulk inserts, so index build is one pass
         conn.commit()
     finally:
         conn.close()
@@ -454,7 +464,20 @@ class GraphStore:
         self.conn.row_factory = sqlite3.Row
         if mode == "build":
             self.conn.executescript(_SCHEMA)
+        else:
+            # Older .db files were built before the claim indexes existed; add
+            # them on open so per-entity/-document lookups aren't full scans.
+            self._ensure_indexes()
         self._meta: KnowledgeGraph | None = None  # lazily-built entities-only view
+
+    def _ensure_indexes(self) -> None:
+        """Create the claim lookup indexes if missing (no-op when present, or
+        when there's no claims table yet)."""
+        if self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='claims'"
+        ).fetchone():
+            self.conn.executescript(_INDEXES)
+            self.conn.commit()
 
     def __enter__(self):
         return self
@@ -524,6 +547,7 @@ class GraphStore:
         for entity in entities:
             self.add_entity(entity)  # write final mention counts
         self.conn.commit()
+        self._ensure_indexes()  # build indexes once, after all claims are written
 
     def entity_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
@@ -614,6 +638,12 @@ class GraphStore:
             "SELECT * FROM claims WHERE subject_id=? OR object_id=?", (entity_id, entity_id)
         ).fetchall()
         return self._kg_from_claim_rows(rows)
+
+    def subgraph_of(self, entity):
+        """A tiny KnowledgeGraph of just this entity's claims, on which the
+        entity-scoped views (identity_profile/perspectives_on/drift/conflicts)
+        can all run — build it once instead of once per view."""
+        return self._subgraph(entity.id)
 
     def claims_about(self, entity):
         return self._subgraph(entity.id).claims_about(entity)
