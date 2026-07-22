@@ -142,6 +142,22 @@ def cmd_link(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_merge(args: argparse.Namespace) -> int:
+    """Union one graph.db into another in place, keeping both graphs' data."""
+    from .store import merge_sqlite
+
+    for label, p in (("source", args.src), ("destination", args.dst)):
+        if not str(p).endswith(".db"):
+            print(f"merge operates on graph.db (SQLite) files; {label} {p!r} is not a .db", file=sys.stderr)
+            return 1
+        if not Path(p).exists():
+            print(f"{label} database not found: {p}", file=sys.stderr)
+            return 1
+    merge_sqlite(args.src, args.dst)
+    print(f"Merged {args.src} into {args.dst}.")
+    return 0
+
+
 def cmd_query(args: argparse.Namespace) -> int:
     # A .db graph is queried against SQLite (no full load); .json loads into RAM.
     if str(args.graph).endswith(".db"):
@@ -273,6 +289,11 @@ def main(argv: list[str] | None = None) -> int:
     site.add_argument("-o", "--out", default="site", help="Output directory (default: site)")
     site.set_defaults(func=cmd_site)
 
+    merge = sub.add_parser("merge", help="Union one graph.db into another (in place)")
+    merge.add_argument("src", help="Source graph.db to merge FROM")
+    merge.add_argument("dst", help="Destination graph.db to merge INTO (modified in place)")
+    merge.set_defaults(func=cmd_merge)
+
     link = sub.add_parser("link", help="Link an existing graph.db's entities to DBpedia (in place)")
     link.add_argument("db", help="Path to graph.db")
     link.add_argument("--spotlight-url", default=None, help="Spotlight REST base URL (default: public api.dbpedia-spotlight.org/en)")
@@ -292,6 +313,10 @@ def main(argv: list[str] | None = None) -> int:
         level=level, stream=sys.stderr,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S",
     )
+    # Under -v (root=DEBUG) the HTTP stack floods the log with per-request line
+    # noise; keep our own DEBUG (timing/token/cache metrics) but quiet theirs.
+    for noisy in ("httpx", "httpcore", "anthropic"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     return args.func(args)
 
 

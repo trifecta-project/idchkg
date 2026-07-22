@@ -173,6 +173,60 @@ def test_graphstore_conflicts_via_sql(tmp_path):
     store.close()
 
 
+# --- merge_sqlite: union two graph dbs (keep both, dedupe by deterministic id) --
+
+def _build_other_graph() -> KnowledgeGraph:
+    """A second graph sharing the coffee/plant entity but a new doc + claim, so a
+    merge must union documents/claims and *sum* the shared entity's count."""
+    from idchkg.models import EntityMention
+
+    kg = KnowledgeGraph()
+    kg.add_document(Document(
+        id="tea", title="tea",
+        text="Tea and coffee are plants cultivated in large plantations.",
+    ))
+    resolver = EntityResolver()
+    resolver.add_mention(EntityMention(name="coffee", sense="plant"))  # same id as dst's coffee/plant
+    resolver.add_mention(EntityMention(name="plantation"))
+    claim = Claim(
+        "coffee", "grown in", "plantation",
+        perspective=Perspective("author", "asserts", "neutral"),
+        context="agriculture", subject_sense="plant",
+        provenance=Provenance("tea", "tea#c0", "cultivated in large plantations", "mock"),
+    )
+    kg.add_claim(claim, resolver.resolve("coffee", "plant"), resolver.resolve("plantation"))
+    kg.finalize_entities(resolver.entities)
+    return kg
+
+
+def test_merge_sqlite_unions_and_sums_shared_entities(tmp_path):
+    from idchkg.store import merge_sqlite
+
+    dst = tmp_path / "dst.db"
+    src = tmp_path / "src.db"
+    save_sqlite(_build_graph(), dst)        # coffee+sugar docs; coffee/plant count=2
+    save_sqlite(_build_other_graph(), src)  # tea doc; coffee/plant count=1
+
+    merge_sqlite(src, dst)                   # union src INTO dst, in place
+    merged = load_sqlite(dst)
+
+    # Documents from both graphs survive (nothing on the dst side is lost).
+    assert {d.id for d in merged._documents.values()} == {"coffee", "sugar", "tea"}
+    # Distinct claims (different content hashes) are both kept.
+    preds = {(c.subject, c.predicate, c.object) for c in merged.claims}
+    assert ("coffee", "cultivated for", "seeds") in preds
+    assert ("coffee", "grown in", "plantation") in preds
+    # Shared coffee/plant entity: mention_count summed 2+1; beverage sense intact.
+    senses = {e.sense: e.mention_count for e in merged.senses_of("coffee")}
+    assert senses == {"plant": 3, "beverage": 1}
+    # New entity from src is present; near-identity link not duplicated.
+    assert merged.find_entity("plantation") is not None
+    assert len(merged.identity_links) == 1
+    # FTS index carries the new doc's chunks (deduped by chunk_id, no crash).
+    # "tea" is unique to the merged-in document.
+    assert retrieve(dst, "tea", k=1)[0]["document_id"] == "tea"
+
+
 _DBP = {"uri": "http://dbpedia.org/resource/Coffee", "score": 0.98,
         "surfaceForm": "coffee", "types": ["http://dbpedia.org/ontology/Beverage"],
         "dbo_type": ["http://dbpedia.org/resource/Espresso"]}

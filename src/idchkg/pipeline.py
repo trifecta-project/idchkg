@@ -24,6 +24,7 @@ from pathlib import Path
 
 from .extract import Extractor, chunk_document
 from .graph import KnowledgeGraph
+from .gutenberg import strip_gutenberg_boilerplate
 from .judge import ACCEPT, REVISE, JudgePanel
 from .llm import LLMClient, LLMError, get_client
 from .models import ACCEPTED, REJECTED, REPAIRED, Chunk, Claim, Document, EntityMention, slugify
@@ -176,10 +177,13 @@ class Pipeline:
                 if doc_id in seen_ids:
                     continue
                 seen_ids.add(doc_id)
+                # Strip Project Gutenberg header/footer boilerplate so we don't
+                # extract and judge license text (a no-op on non-Gutenberg files).
+                text = strip_gutenberg_boilerplate(file.read_text(encoding="utf-8"))
                 documents.append(
                     Document(
                         id=doc_id,
-                        text=file.read_text(encoding="utf-8"),
+                        text=text,
                         title=file.stem.replace("_", " "),
                         metadata={"path": str(file)},
                     )

@@ -212,6 +212,110 @@ def load_sqlite(path: str | Path) -> KnowledgeGraph:
     return kg
 
 
+def _union_json_list(a: str | None, b: str | None) -> str:
+    """Union two JSON-encoded lists, preserving first-seen order."""
+    merged: list = []
+    for blob in (a, b):
+        for item in json.loads(blob or "[]"):
+            if item not in merged:
+                merged.append(item)
+    return json.dumps(merged, ensure_ascii=False)
+
+
+def _copy_upsert(src: sqlite3.Connection, dst: sqlite3.Connection, table: str) -> None:
+    """Copy every row of `table` from src into dst with INSERT OR REPLACE, so
+    rows sharing a primary key (deterministic doc/claim ids) coincide."""
+    cur = src.execute(f"SELECT * FROM {table}")
+    placeholders = ",".join("?" * len(cur.description))
+    dst.executemany(f"INSERT OR REPLACE INTO {table} VALUES ({placeholders})", (tuple(r) for r in cur))
+
+
+def merge_sqlite(src: str | Path, dst: str | Path) -> None:
+    """Union the graph db at `src` into the existing db at `dst` in place.
+
+    Both must be files written by ``save_sqlite`` / ``GraphStore`` (same schema).
+    Because entity ids are deterministic ``(label, sense)`` slugs and claim ids
+    are content hashes, identical rows across the two graphs coincide by primary
+    key; the rest is a straight union:
+
+    * documents, claims — ``INSERT OR REPLACE`` (dedupe by id).
+    * entities — on id collision, **sum** ``mention_count`` and union the JSON
+      list columns (aliases/descriptions/contexts), keeping dst's dbpedia unless
+      empty; otherwise insert the row.
+    * identity_links / evolution — append rows whose natural key is not already
+      in dst.
+    * chunks_fts — append chunks whose ``chunk_id`` is not already indexed.
+
+    Additive by design: safe to re-run for links/evolution/chunks (deduped), but
+    entity ``mention_count`` summing is **not** idempotent — do not merge the
+    same `src` into the same `dst` twice.
+    """
+    s = sqlite3.connect(str(src))
+    s.row_factory = sqlite3.Row
+    d = sqlite3.connect(str(dst))
+    d.row_factory = sqlite3.Row
+    try:
+        _copy_upsert(s, d, "documents")
+        _copy_upsert(s, d, "claims")
+
+        for r in s.execute("SELECT * FROM entities"):
+            row = d.execute(
+                "SELECT mention_count, aliases, descriptions, contexts, dbpedia FROM entities WHERE id=?",
+                (r["id"],),
+            ).fetchone()
+            if row is None:
+                d.execute(
+                    "INSERT INTO entities VALUES (?,?,?,?,?,?,?,?,?)",
+                    (r["id"], r["label"], r["type"], r["sense"], r["mention_count"],
+                     r["aliases"], r["descriptions"], r["contexts"], r["dbpedia"]),
+                )
+            else:
+                d.execute(
+                    "UPDATE entities SET mention_count=?, aliases=?, descriptions=?, contexts=?, dbpedia=? WHERE id=?",
+                    (
+                        (row["mention_count"] or 0) + (r["mention_count"] or 0),
+                        _union_json_list(row["aliases"], r["aliases"]),
+                        _union_json_list(row["descriptions"], r["descriptions"]),
+                        _union_json_list(row["contexts"], r["contexts"]),
+                        row["dbpedia"] or r["dbpedia"],
+                        r["id"],
+                    ),
+                )
+
+        seen_links = {
+            (r["left_id"], r["right_id"], r["relation"], r["context"])
+            for r in d.execute("SELECT left_id, right_id, relation, context FROM identity_links")
+        }
+        for r in s.execute("SELECT * FROM identity_links"):
+            key = (r["left_id"], r["right_id"], r["relation"], r["context"])
+            if key not in seen_links:
+                seen_links.add(key)
+                d.execute("INSERT INTO identity_links VALUES (?,?,?,?,?)", tuple(r))
+
+        seen_ev = {
+            (r["entity_id"], r["kind"], r["when_"], r["related_id"])
+            for r in d.execute("SELECT entity_id, kind, when_, related_id FROM evolution")
+        }
+        for r in s.execute("SELECT * FROM evolution"):
+            key = (r["entity_id"], r["kind"], r["when_"], r["related_id"])
+            if key not in seen_ev:
+                seen_ev.add(key)
+                d.execute("INSERT INTO evolution VALUES (?,?,?,?,?)", tuple(r))
+
+        seen_chunks = {r["chunk_id"] for r in d.execute("SELECT chunk_id FROM chunks_fts")}
+        for r in s.execute("SELECT chunk_id, document_id, text FROM chunks_fts"):
+            if r["chunk_id"] not in seen_chunks:
+                seen_chunks.add(r["chunk_id"])
+                d.execute(
+                    "INSERT INTO chunks_fts (chunk_id, document_id, text) VALUES (?,?,?)",
+                    (r["chunk_id"], r["document_id"], r["text"]),
+                )
+        d.commit()
+    finally:
+        s.close()
+        d.close()
+
+
 _WORD = re.compile(r"\w+", re.UNICODE)
 
 
