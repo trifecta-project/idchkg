@@ -970,6 +970,44 @@ _GEOCODE: dict[str, tuple[float, float]] = {
     "mississippi": (32.0, -91.0), "yangtze": (30.0, 112.0), "mekong": (16.0, 105.0),
     "alps": (46.5, 10.0), "himalayas": (28.0, 84.0), "andes": (-20.0, -66.0),
     "sahel": (14.0, 0.0),
+    # Commodity-trade hubs frequent in the corpus (historical names point at the
+    # modern location, e.g. Batavia -> Jakarta, Abyssinia -> Ethiopia).
+    "philadelphia": (39.95, -75.16), "new orleans": (29.95, -90.07),
+    "baltimore": (39.29, -76.61), "pittsburgh": (40.44, -80.00),
+    "st. louis": (38.63, -90.20), "hamburg": (53.55, 9.99), "havre": (49.49, 0.11),
+    "marseilles": (43.30, 5.37), "antwerp": (51.22, 4.40), "leipzig": (51.34, 12.37),
+    "oxford": (51.75, -1.26), "santos": (-23.96, -46.33), "rio": (-22.91, -43.17),
+    "bahia": (-12.97, -38.51), "maracaibo": (10.65, -71.64), "caracas": (10.48, -66.90),
+    "cayenne": (4.93, -52.33), "demerara": (6.80, -58.16), "aden": (12.79, 45.04),
+    "mocha": (13.32, 43.25), "harar": (9.31, 42.12), "kaffa": (7.27, 36.23),
+    "aleppo": (36.20, 37.16), "malabar": (11.50, 75.50), "mysore": (12.30, 76.64),
+    "padang": (-0.95, 100.35), "batavia": (-6.21, 106.85), "celebes": (-2.0, 121.0),
+    # islands / regions / colonies (many under period names)
+    "arabia": (23.0, 45.0), "madagascar": (-18.9, 47.5), "mauritius": (-20.2, 57.5),
+    "hawaii": (20.8, -156.3), "hawaiian islands": (20.8, -156.3),
+    "martinique": (14.64, -61.02), "martinico": (14.64, -61.02),
+    "guadeloupe": (16.25, -61.58), "porto rico": (18.22, -66.59),
+    "haiti": (19.0, -72.4), "santo domingo": (18.5, -69.9),
+    "dominican republic": (18.7, -70.2), "barbados": (13.19, -59.54),
+    "trinidad": (10.5, -61.3), "surinam": (4.0, -56.0), "british guiana": (5.0, -58.9),
+    "french guiana": (4.0, -53.0), "nicaragua": (12.87, -85.21), "liberia": (6.4, -9.4),
+    "angola": (-11.2, 17.9), "abyssinia": (9.0, 39.0), "british india": (21.0, 78.0),
+    "southern india": (12.0, 78.0), "french indo-china": (16.0, 106.0),
+    "dutch east indies": (-2.0, 118.0), "queensland": (-22.0, 144.0),
+    "austria-hungary": (47.5, 16.4), "louisiana": (30.9, -91.9),
+    "pennsylvania": (41.2, -77.2), "virginia": (37.5, -78.7),
+    "california": (36.8, -119.4), "new england": (43.5, -71.5),
+    # smaller trade places (second pass)
+    "hodeida": (14.80, 42.95), "honolulu": (21.31, -157.86), "rotterdam": (51.92, 4.48),
+    "philippine islands": (13.0, 122.0), "madras": (13.08, 80.27), "coorg": (12.42, 75.74),
+    "vera cruz": (19.19, -96.14), "reunion": (-21.11, 55.54), "bourbon": (-21.11, 55.54),
+    "oaxaca": (17.06, -96.72), "dutch guiana": (4.0, -56.0), "berbice": (6.30, -57.54),
+    "kona": (19.64, -155.99), "maui": (20.79, -156.33), "kauai": (22.08, -159.50),
+    "padua": (45.41, 11.88), "timor": (-8.8, 125.7), "tonkin": (21.0, 105.8),
+    "hispaniola": (19.0, -71.5), "massachusetts": (42.4, -71.4), "ohio": (40.4, -82.9),
+    "sierra leone": (8.46, -11.78), "penang": (5.41, 100.33), "jibuti": (11.59, 43.15),
+    "zanzibar": (-6.16, 39.19), "moluccas": (-3.0, 129.0), "honduras": (15.2, -86.2),
+    "indian ocean": (-20.0, 80.0), "salvador": (-12.97, -38.51),  # Salvador, Bahia
 }
 
 
@@ -994,9 +1032,15 @@ _GEO_ZOOM_JS = """<script>
  function pt(e){var r=svg.getBoundingClientRect();return{x:vb.x+(e.clientX-r.left)/r.width*vb.w,y:vb.y+(e.clientY-r.top)/r.height*vb.h};}
  svg.addEventListener('wheel',function(e){e.preventDefault();var p=pt(e);zoom(e.deltaY<0?0.85:1/0.85,p.x,p.y);},{passive:false});
  var drag=null,moved=false;
- svg.addEventListener('pointerdown',function(e){drag={x:e.clientX,y:e.clientY,vx:vb.x,vy:vb.y};moved=false;try{svg.setPointerCapture(e.pointerId);}catch(_){}});
- svg.addEventListener('pointermove',function(e){if(!drag)return;var r=svg.getBoundingClientRect();if(Math.abs(e.clientX-drag.x)+Math.abs(e.clientY-drag.y)>3)moved=true;vb.x=drag.vx-(e.clientX-drag.x)/r.width*vb.w;vb.y=drag.vy-(e.clientY-drag.y)/r.height*vb.h;clamp();apply();});
- function end(){drag=null;}svg.addEventListener('pointerup',end);svg.addEventListener('pointerleave',end);
+ // Capture the pointer only once a drag actually starts — capturing on
+ // pointerdown would retarget the click off the marker and break its link.
+ svg.addEventListener('pointerdown',function(e){drag={x:e.clientX,y:e.clientY,vx:vb.x,vy:vb.y,id:e.pointerId,cap:false};moved=false;});
+ svg.addEventListener('pointermove',function(e){if(!drag)return;var r=svg.getBoundingClientRect();
+   if(!moved&&Math.abs(e.clientX-drag.x)+Math.abs(e.clientY-drag.y)>3){moved=true;try{svg.setPointerCapture(drag.id);drag.cap=true;}catch(_){}}
+   if(!moved)return;
+   vb.x=drag.vx-(e.clientX-drag.x)/r.width*vb.w;vb.y=drag.vy-(e.clientY-drag.y)/r.height*vb.h;clamp();apply();});
+ function end(){if(drag&&drag.cap){try{svg.releasePointerCapture(drag.id);}catch(_){}}drag=null;}
+ svg.addEventListener('pointerup',end);svg.addEventListener('pointerleave',end);
  svg.addEventListener('click',function(e){if(moved){e.preventDefault();e.stopPropagation();}},true);
  function step(f){return function(){zoom(f,vb.x+vb.w/2,vb.y+vb.h/2);};}
  document.getElementById('geo-in').addEventListener('click',step(0.7));

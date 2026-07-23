@@ -474,3 +474,27 @@ def test_site_uses_heuristic_type_for_commodities(tmp_path):
     # entity page header shows Concept, not Organization.
     page = (out / "entity" / "ent-coffee--beverage.html").read_text(encoding="utf-8")
     assert '<span class="type">concept</span>' in page
+
+
+def test_geocode_covers_added_trade_places():
+    from idchkg.site import _geocode_entity
+    for name in ("Madagascar", "New Orleans", "Batavia", "Porto Rico", "Mocha",
+                 "Zanzibar", "Reunion", "Penang", "Moluccas", "Honolulu", "Timor"):
+        assert _geocode_entity(Entity(id="x", label=name, type="place")) is not None, name
+
+
+def test_geomap_markers_are_clickable_links(tmp_path):
+    store = GraphStore(tmp_path / "g.db", mode="build")
+    store.add_document(Document(id="d", text="Zanzibar."))
+    store.finalize_entities([Entity(id="ent-zanzibar", label="Zanzibar", type="place", mention_count=3)])
+    store.close()
+    store = GraphStore(tmp_path / "g.db", mode="query")
+    out = build_site(store, tmp_path / "site")
+    store.close()
+    geo = (out / "geomap.html").read_text(encoding="utf-8")
+    # The marker is a real link to the entity page...
+    assert '<a href="entity/ent-zanzibar.html"><circle' in geo
+    # ...and the pan/zoom JS must NOT capture the pointer on pointerdown (that
+    # would swallow the click); capture happens on drag instead.
+    pointerdown = geo.split("'pointerdown'", 1)[1].split("addEventListener", 1)[0]
+    assert "setPointerCapture" not in pointerdown
