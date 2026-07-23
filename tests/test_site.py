@@ -82,9 +82,10 @@ def test_overview_stat_tiles_and_charts(tmp_path):
     store.close()
     index = (out / "index.html").read_text(encoding="utf-8")
 
-    # Stat-tile band with headline numbers, incl. DBpedia coverage.
+    # Stat-tile band with headline numbers.
     assert "<h2>At a glance</h2>" in index
-    assert 'class="stat-num">50%</span><span class="stat-label">DBpedia-linked' in index
+    assert 'class="stat-label">documents' in index and 'class="stat-label">disagreements' in index
+    assert "DBpedia-linked" not in index  # tile removed
     # 'What the corpus is about' chart is driven by entity senses.
     assert "What the corpus is about" in index
     assert ">beverage</span>" in index                   # coffee's sense
@@ -407,3 +408,30 @@ def test_relationship_graph_shown_only_when_connected(tmp_path):
     assert "<h2>Connections</h2>" in hub_page and 'class="ego-svg"' in hub_page
     lonely_page = (out / "entity" / "ent-lonely.html").read_text(encoding="utf-8")
     assert "<h2>Connections</h2>" not in lonely_page  # isolated entity -> omitted
+
+
+def test_author_viewpoint_resolves_to_book_author(tmp_path):
+    store = GraphStore(tmp_path / "g.db", mode="build")
+    coffee = Entity(id="ent-coffee--beverage", label="coffee", sense="beverage", mention_count=2)
+    obj = Entity(id="ent-x", label="x")
+    store.add_document(Document(id="coffee-pg28500", text="Coffee."))   # in _DOC_AUTHORS
+    store.add_document(Document(id="mystery-web", text="Coffee."))      # not in the map
+    store.add_claim(
+        Claim("coffee", "is", "x", subject_sense="beverage",
+              perspective=Perspective("author", "asserts", "neutral"),
+              provenance=Provenance("coffee-pg28500", "c#0", "coffee")), coffee, obj)
+    store.add_claim(
+        Claim("coffee", "was", "x", subject_sense="beverage",
+              perspective=Perspective("author", "asserts", "neutral"),
+              provenance=Provenance("mystery-web", "c#1", "coffee")), coffee, obj)
+    store.finalize_entities([coffee, obj])
+    store.close()
+
+    store = GraphStore(tmp_path / "g.db", mode="query")
+    out = build_site(store, tmp_path / "site")
+    store.close()
+    page = (out / "entity" / "ent-coffee--beverage.html").read_text(encoding="utf-8")
+    # The known-doc 'author' claim resolves to a per-author perspective card.
+    assert "<h3>William H. Ukers (author)</h3>" in page
+    # The unmapped-doc 'author' claim keeps the generic label.
+    assert "<h3>author</h3>" in page

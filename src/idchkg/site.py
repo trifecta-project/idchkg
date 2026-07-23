@@ -32,11 +32,40 @@ logger = logging.getLogger(__name__)
 # Path.write_text raise. Such entities are extraction errors — we skip them.
 _MAX_FILENAME_BYTES = 255
 
+# Source-book authors, keyed by document id — so the generic "author" viewpoint
+# resolves to who actually said it ("William H. Ukers (author)"). The DB text was
+# stripped of its Gutenberg headers, so this is a curated map (easily edited);
+# documents absent from it (e.g. the web-article sources) keep the raw viewpoint.
+_DOC_AUTHORS = {
+    "coffee-pg28500": "William H. Ukers",
+    "general-pg50759": "Frederick B. Goddard",
+    "general-pg53027": "Simon Paulli",
+    "spices-pg60192": "Robert O. Fielding",
+    "sugar-pg52820": "J. Ewing Ritchie",
+    "sugar-pg73616": "George M. Rolph",
+    "tea-pg46775": "Rodris Roth",
+    "okakura-book-of-tea": "Kakuzo Okakura",
+    "pg24588": "D. Quélus",
+    "pg57340": "P. L. Simmonds",
+}
+
 # ------------------------------------------------------------------ helpers
 
 
 def _esc(value) -> str:
     return html.escape("" if value is None else str(value))
+
+
+def _viewpoint(claim) -> str:
+    """Display label for a claim's viewpoint: the generic "author" is resolved to
+    the source book's author ("Name (author)"); everything else is left as-is."""
+    viewpoint = claim.perspective.viewpoint
+    if viewpoint and viewpoint.strip().lower() == "author":
+        prov = claim.provenance
+        author = _DOC_AUTHORS.get(prov.document_id) if prov else None
+        if author:
+            return f"{author} (author)"
+    return viewpoint
 
 
 def _filename_too_long(entity) -> bool:
@@ -258,15 +287,12 @@ def _figure(title: str, body: str, note_html: str = "") -> str:
 def _render_overview(graph, entities) -> str:
     """The index 'At a glance' band: stat tiles + a few insight charts."""
     n_ent = graph.entity_count()
-    linked = sum(1 for e in entities if getattr(e, "dbpedia", None))
-    pct_linked = round(100 * linked / len(entities)) if entities else 0
     ps = graph.perspective_stats()
 
     tiles = _stat_tiles([
         (graph.document_count(), "documents"),
         (n_ent, "entities"),
         (graph.claim_count(), "claims"),
-        (f"{pct_linked}%", "DBpedia-linked"),
         (ps["viewpoints"], "viewpoints"),
         (len(graph.conflicts()), "disagreements"),
     ])
@@ -416,7 +442,7 @@ def _render_conflicts_section(graph, by_key, prefix: str, limit: int = 25, more_
         rows = "".join(
             f'<li>{_entity_link(c.object, c.object_sense, by_key, prefix)} '
             f'<span class="chip stance-{_esc(c.perspective.stance)}">{_esc(c.perspective.stance)}</span> '
-            f'<span class="src">{_esc(c.perspective.viewpoint)}</span></li>'
+            f'<span class="src">{_esc(_viewpoint(c))}</span></li>'
             for c in group
         )
         head = group[0]
@@ -466,7 +492,7 @@ def _render_disagreements(graph, by_key) -> str:
         rows = "".join(
             f'<li>{_entity_link(c.object, c.object_sense, by_key, "entity/")} '
             f'<span class="chip stance-{_esc(c.perspective.stance)}">{_esc(c.perspective.stance)}</span> '
-            f'<span class="src">{_esc(c.perspective.viewpoint)}</span></li>'
+            f'<span class="src">{_esc(_viewpoint(c))}</span></li>'
             for c in group
         )
         blocks.append(
@@ -776,8 +802,11 @@ def _render_entity(graph, entity, by_key, anchors=None, views=None) -> str:
         rows = "".join(_prop_html(p, by_key, prefix) for p in props)
         props_html = f'<section><h2>Defining properties</h2><ul class="props">{rows}</ul></section>'
 
-    # Perspectives — the centrepiece.
-    grouped = views.perspectives_on(entity)
+    # Perspectives — the centrepiece. Group by the *resolved* viewpoint, so the
+    # generic "author" splits into a card per actual author (William H. Ukers …).
+    grouped: dict[str, list] = {}
+    for c in views.claims_about(entity):
+        grouped.setdefault(_viewpoint(c), []).append(c)
     persp_cards = ""
     for viewpoint, claims in sorted(grouped.items(), key=lambda kv: (-len(kv[1]), kv[0])):
         claim_lis = "".join(_claim_html(c, by_key, prefix, doc_prefix="../doc/", anchors=anchors) for c in claims)
@@ -813,7 +842,7 @@ def _render_entity(graph, entity, by_key, anchors=None, views=None) -> str:
             rows = "".join(
                 f'<li>{_entity_link(c.object, c.object_sense, by_key, prefix)} '
                 f'<span class="chip stance-{_esc(c.perspective.stance)}">{_esc(c.perspective.stance)}</span> '
-                f'<span class="src">{_esc(c.perspective.viewpoint)}</span></li>'
+                f'<span class="src">{_esc(_viewpoint(c))}</span></li>'
                 for c in group
             )
             blocks.append(
@@ -1218,7 +1247,7 @@ def _render_timeline(graph, by_key, anchors=None) -> str:
             f'<div class="tl-item"><div class="tl-when">{_esc(when)}</div>'
             f'<div class="tl-body"><div class="stmt">{subj} <span class="pred">{_esc(c.predicate)}</span> {obj}</div>'
             f'<div class="chips"><span class="chip stance-{_esc(c.perspective.stance)}">{_esc(c.perspective.stance)}</span>'
-            f'<span class="src">{_esc(c.perspective.viewpoint)}</span>{src}</div></div></div>'
+            f'<span class="src">{_esc(_viewpoint(c))}</span>{src}</div></div></div>'
         )
     body = intro + f'<div class="timeline-viz">{"".join(items)}</div>'
     return _page("Timeline — idchkg", body, depth=0)
@@ -1355,11 +1384,8 @@ li.claim:last-child{border-bottom:0}
 .src-doc{color:var(--accent);font-size:.78rem;white-space:nowrap}
 .src-doc::before{content:"↳ ";color:var(--muted)}
 .src-doc:hover{text-decoration:underline}
-header.site nav{margin-left:auto;display:flex;flex-direction:column;align-items:flex-end;gap:5px;font-size:.92rem}
+header.site nav{margin-left:auto;display:flex;flex-direction:column;align-items:flex-start;gap:5px;font-size:.92rem}
 .nav-row{display:flex;gap:18px}
-/* running-bond: offset the second row by ~half a link so the joints stagger */
-.nav-row+.nav-row{margin-right:2.2em}
-@media(max-width:600px){header.site nav{align-items:flex-start}.nav-row+.nav-row{margin-right:0;margin-left:2.2em}}
 blockquote{margin:.4em 0;padding:.3em 0 .3em .8em;border-left:3px solid var(--line);
   color:#444;font-size:.92rem}
 blockquote::before{content:"“"}blockquote::after{content:"”"}
