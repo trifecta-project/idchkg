@@ -14,9 +14,13 @@ distribution (Challenge 3).
 
 from __future__ import annotations
 
+import logging
 import re
+from collections import Counter
 
 from .models import Entity, EntityMention, IdentityLink, slugify
+
+logger = logging.getLogger(__name__)
 
 
 def _canonical(name: str) -> str:
@@ -29,6 +33,13 @@ class EntityResolver:
         self._alias_map = {_canonical(a): _canonical(c) for a, c in (aliases or {}).items()}
         self._by_key: dict[tuple[str, str], Entity] = {}
         self._links: dict[tuple[str, str], IdentityLink] = {}
+        # Per-entity type resolution: tally every mention's type and use the
+        # majority, instead of locking in the first non-"concept" one (which let
+        # a single stray label mistype a whole entity, e.g. coffee -> organization).
+        self._type_votes: dict[tuple[str, str], Counter] = {}
+        # The type the old "first specific type wins" rule would have produced —
+        # kept only to report how many entities the majority vote reclassifies.
+        self._first_type: dict[tuple[str, str], str] = {}
 
     def _canonical_label(self, name: str) -> str:
         key = _canonical(name)
@@ -50,6 +61,7 @@ class EntityResolver:
             )
             self._by_key[key] = entity
             self._link_senses(label_key, entity)
+            self._first_type[key] = mention.type
         entity.mention_count += 1
         name = mention.name.strip()
         if name and name != entity.label and name not in entity.aliases:
@@ -58,9 +70,31 @@ class EntityResolver:
             entity.descriptions.append(mention.description)
         if mention.context and mention.context not in entity.contexts:
             entity.contexts.append(mention.context)
-        if entity.type == "concept" and mention.type != "concept":
-            entity.type = mention.type
+        # Majority vote on the type across all mentions.
+        votes = self._type_votes.setdefault(key, Counter())
+        votes[mention.type] += 1
+        entity.type = self._majority_type(votes)
+        # Track what the old first-specific-type rule would have chosen.
+        if self._first_type[key] == "concept" and mention.type != "concept":
+            self._first_type[key] = mention.type
         return entity
+
+    @staticmethod
+    def _majority_type(votes: Counter) -> str:
+        """The most-voted mention type; ties broken deterministically by type
+        name (so e.g. a concept↔organization tie stays 'concept')."""
+        return min(votes.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+
+    def type_vote_stats(self) -> dict:
+        """How the majority vote compares to the old rule — for the build log.
+        `reclassified` = entities whose type differs from the old rule; `mixed` =
+        entities that saw more than one mention type."""
+        reclassified = sum(
+            1 for key, entity in self._by_key.items()
+            if self._first_type.get(key, entity.type) != entity.type
+        )
+        mixed = sum(1 for votes in self._type_votes.values() if len(votes) > 1)
+        return {"total": len(self._by_key), "mixed": mixed, "reclassified": reclassified}
 
     def resolve(self, name: str, sense: str = "") -> Entity:
         """Resolve a claim's subject/object. If the exact (label, sense) is

@@ -56,6 +56,22 @@ def _esc(value) -> str:
     return html.escape("" if value is None else str(value))
 
 
+# The heuristic label-majority type (type_heuristic) is trusted for display ONLY
+# in the to-"concept" direction — it reliably fixes commodity mistypes (coffee
+# typed organization, sugar typed work) but is noisy elsewhere, so a real
+# person/place/event is never pulled to concept.
+_HEURISTIC_PROTECTED = {"person", "place", "event"}
+
+
+def _display_type(entity) -> str:
+    """The entity type shown in the site: the heuristic 'concept' correction when
+    it applies (and the stored type isn't a protected person/place/event), else
+    the stored type."""
+    if getattr(entity, "type_heuristic", None) == "concept" and entity.type not in _HEURISTIC_PROTECTED:
+        return "concept"
+    return entity.type
+
+
 def _viewpoint(claim) -> str:
     """Display label for a claim's viewpoint: the generic "author" is resolved to
     the source book's author ("Name (author)"); everything else is left as-is."""
@@ -590,7 +606,7 @@ def _ego_graph_svg(focus, neighbors, senses) -> str:
         )
         nodes.append(
             f'<a href="{_esc(e.id)}.html"><circle cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}" '
-            f'fill="{color(e.type)}" class="ego-node">'
+            f'fill="{color(_display_type(e))}" class="ego-node">'
             f'<title>{_esc(e.label)} — {w} shared claim{"" if w == 1 else "s"}</title></circle></a>'
         )
         labels.append(
@@ -603,7 +619,7 @@ def _ego_graph_svg(focus, neighbors, senses) -> str:
         f'<text x="{cx}" y="{cy + fr + 14:.1f}" text-anchor="middle" '
         f'class="ego-label ego-focus-label">{_esc(trunc(focus.label))}</text>'
     )
-    present = [t for t in _TYPE_COLOR if any(e.type == t for e, _ in neighbors)]
+    present = [t for t in _TYPE_COLOR if any(_display_type(e) == t for e, _ in neighbors)]
     legend = "".join(
         f'<span class="leg"><span class="swatch" style="background:{_TYPE_COLOR[t]}"></span>{t.capitalize()}</span>'
         for t in present
@@ -762,7 +778,7 @@ def _render_entity(graph, entity, by_key, anchors=None, views=None) -> str:
     sub = f'<span class="sense">{_esc(entity.sense)}</span>' if entity.sense else '<span class="sense muted">unspecified sense</span>'
     header = (
         f'<section class="entity-head"><h1>{label} {sub}</h1>'
-        f'<p class="meta"><span class="type">{_esc(entity.type)}</span> · '
+        f'<p class="meta"><span class="type">{_esc(_display_type(entity))}</span> · '
         f'{entity.mention_count} mention{"s" if entity.mention_count != 1 else ""}</p>'
     )
     if entity.descriptions:
@@ -992,7 +1008,7 @@ _GEO_ZOOM_JS = """<script>
 
 def _render_geomap(graph, entities, by_key) -> str:
     """A geographical heatmap: place entities plotted on a world map, coloured by frequency."""
-    places = [e for e in entities if e.type == "place"]
+    places = [e for e in entities if _display_type(e) == "place"]
     if not places:
         return _page(
             "Map — idchkg",
@@ -1178,7 +1194,7 @@ def build_site(graph, out_dir: str | Path) -> Path:
     # index page's search works over file:// without inlining tens of thousands.
     (out / "entities.js").write_text(
         "window.ENTITIES=" + json.dumps(
-            [[e.id, e.label, e.sense or "", e.type or "", e.mention_count] for e in entities],
+            [[e.id, e.label, e.sense or "", _display_type(e) or "", e.mention_count] for e in entities],
             ensure_ascii=False, separators=(",", ":")) + ";",
         encoding="utf-8",
     )

@@ -292,3 +292,29 @@ def test_enrich_sqlite_adds_column_to_old_db_and_populates(tmp_path):
     by_id = {e.id: e for e in load_sqlite(path).entities}
     assert by_id["ent-coffee"].dbpedia == _DBP
     assert by_id["ent-sugar"].dbpedia is None
+
+
+def test_reclassify_types_uses_label_majority(tmp_path):
+    from idchkg.store import reclassify_types
+
+    kg = KnowledgeGraph()
+    kg.add_document(Document(id="d", text="Coffee."))
+    # 3 senses of 'coffee' typed concept + 1 stray 'organization' (high mentions).
+    kg.add_entity(Entity(id="ent-coffee--plant", label="coffee", sense="plant", type="concept"))
+    kg.add_entity(Entity(id="ent-coffee--commodity", label="coffee", sense="commodity", type="concept"))
+    kg.add_entity(Entity(id="ent-coffee--activity", label="coffee", sense="activity", type="concept"))
+    kg.add_entity(Entity(id="ent-coffee--beverage", label="coffee", sense="beverage", type="organization",
+                         mention_count=1299))
+    # A genuine single-sense person is left as-is (its own label majority).
+    kg.add_entity(Entity(id="ent-ukers", label="William H. Ukers", type="person"))
+    path = tmp_path / "g.db"
+    save_sqlite(kg, path)
+
+    stats = reclassify_types(path)
+    assert stats["changed"] == 1                    # only the mistyped beverage flips
+
+    by_id = {e.id: e for e in load_sqlite(path).entities}
+    assert by_id["ent-coffee--beverage"].type == "organization"          # original untouched
+    assert by_id["ent-coffee--beverage"].type_heuristic == "concept"     # heuristic corrects it
+    assert by_id["ent-coffee--plant"].type_heuristic == "concept"
+    assert by_id["ent-ukers"].type_heuristic == "person"                 # single-sense unchanged

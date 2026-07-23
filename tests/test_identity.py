@@ -147,3 +147,26 @@ def test_claim_context_round_trips():
     restored = KnowledgeGraph.from_dict(kg.to_dict())
     contexts = {c.context for c in restored.claims}
     assert "the drink" in contexts
+
+
+def test_entity_type_is_majority_vote_not_first_specific():
+    # 3 'concept' mentions + 1 stray 'organization' -> majority keeps 'concept',
+    # where the old first-specific-type rule flipped the whole entity.
+    r = EntityResolver()
+    for t in ("concept", "organization", "concept", "concept"):
+        e = r.add_mention(EntityMention("coffee", sense="beverage", type=t))
+    assert e.type == "concept"
+    assert e.mention_count == 4
+
+    stats = r.type_vote_stats()
+    assert stats["reclassified"] == 1   # differs from the old-rule outcome
+    assert stats["mixed"] == 1          # saw >1 mention type
+
+
+def test_entity_type_promotes_when_specific_type_is_the_majority():
+    r = EntityResolver()
+    for t in ("concept", "person", "person"):
+        e = r.add_mention(EntityMention("Okakura", type=t))
+    assert e.type == "person"           # majority is 'person'
+    # old rule also gave 'person' here, so no reclassification
+    assert r.type_vote_stats()["reclassified"] == 0

@@ -142,6 +142,22 @@ def cmd_link(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_reclassify_types(args: argparse.Namespace) -> int:
+    """Fill a heuristic `type_heuristic` column (label-majority type) in place."""
+    from .store import reclassify_types
+
+    if not str(args.db).endswith(".db"):
+        print("reclassify-types operates on a graph.db (SQLite) file.", file=sys.stderr)
+        return 1
+    s = reclassify_types(args.db)
+    print(
+        f"Wrote type_heuristic for {s['total']} entities — {s['changed']} differ from the stored "
+        f"type ({s['low_confidence_labels']} multi-sense labels had no clear majority). "
+        "Stored in a separate column; the site still shows the original type."
+    )
+    return 0
+
+
 def cmd_merge(args: argparse.Namespace) -> int:
     """Union one graph.db into another in place, keeping both graphs' data."""
     from .store import merge_sqlite
@@ -301,6 +317,13 @@ def main(argv: list[str] | None = None) -> int:
     link.add_argument("--relink", action="store_true", help="Re-link entities that already have a DBpedia link")
     link.add_argument("--concurrency", type=int, default=4, help="Parallel linking requests (default: 4)")
     link.set_defaults(func=cmd_link)
+
+    reclassify = sub.add_parser(
+        "reclassify-types",
+        help="Fill a heuristic type_heuristic column (label-majority type) on an existing graph.db",
+    )
+    reclassify.add_argument("db", help="Path to graph.db")
+    reclassify.set_defaults(func=cmd_reclassify_types)
 
     args = parser.parse_args(argv)
 

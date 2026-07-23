@@ -435,3 +435,42 @@ def test_author_viewpoint_resolves_to_book_author(tmp_path):
     assert "<h3>William H. Ukers (author)</h3>" in page
     # The unmapped-doc 'author' claim keeps the generic label.
     assert "<h3>author</h3>" in page
+
+
+def test_display_type_only_corrects_to_concept_and_protects_real_types():
+    from idchkg.site import _display_type
+    # commodity mistypes -> corrected to concept
+    assert _display_type(Entity(id="a", label="coffee", type="organization", type_heuristic="concept")) == "concept"
+    assert _display_type(Entity(id="b", label="sugar", type="work", type_heuristic="concept")) == "concept"
+    # real person/place/event are never pulled to concept
+    assert _display_type(Entity(id="c", label="Rousseau", type="person", type_heuristic="concept")) == "person"
+    assert _display_type(Entity(id="d", label="Mocha", type="place", type_heuristic="concept")) == "place"
+    # non-concept heuristic is ignored; no heuristic -> stored type
+    assert _display_type(Entity(id="e", label="x", type="work", type_heuristic="place")) == "work"
+    assert _display_type(Entity(id="f", label="y", type="organization", type_heuristic=None)) == "organization"
+
+
+def test_site_uses_heuristic_type_for_commodities(tmp_path):
+    from idchkg.store import reclassify_types
+    store = GraphStore(tmp_path / "g.db", mode="build")
+    # 3 concept senses + a beverage sense mistyped as organization.
+    ents = [
+        Entity(id="ent-coffee--plant", label="coffee", sense="plant", type="concept"),
+        Entity(id="ent-coffee--commodity", label="coffee", sense="commodity", type="concept"),
+        Entity(id="ent-coffee--activity", label="coffee", sense="activity", type="concept"),
+        Entity(id="ent-coffee--beverage", label="coffee", sense="beverage", type="organization", mention_count=9),
+    ]
+    store.add_document(Document(id="d", text="Coffee."))
+    store.finalize_entities(ents)
+    store.close()
+    reclassify_types(tmp_path / "g.db")   # fills type_heuristic = concept for all
+
+    store = GraphStore(tmp_path / "g.db", mode="query")
+    out = build_site(store, tmp_path / "site")
+    store.close()
+    # entities.js carries the corrected type for the search facets.
+    ejs = (out / "entities.js").read_text(encoding="utf-8")
+    assert '"ent-coffee--beverage","coffee","beverage","concept"' in ejs
+    # entity page header shows Concept, not Organization.
+    page = (out / "entity" / "ent-coffee--beverage.html").read_text(encoding="utf-8")
+    assert '<span class="type">concept</span>' in page

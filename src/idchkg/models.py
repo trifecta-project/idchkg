@@ -137,6 +137,9 @@ class Entity:
     # DBpedia link (optional, set by the linking step / `idchkg link`):
     # {"uri", "score", "surfaceForm", "types", "dbo_type"} or None when unlinked.
     dbpedia: dict | None = None
+    # Heuristic label-majority type (optional, set by `idchkg reclassify-types`).
+    # Kept separate from `type` so the site can opt in only if it proves reliable.
+    type_heuristic: str | None = None
 
 
 @dataclass

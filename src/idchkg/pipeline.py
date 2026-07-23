@@ -235,6 +235,12 @@ class Pipeline:
             graph.add_identity_link(link)
         graph.finalize_entities(resolver.entities)
 
+        ts = resolver.type_vote_stats()
+        logger.info(
+            "entity types: majority vote reclassified %d/%d entities vs the "
+            "first-specific-type rule (%d saw >1 mention type)",
+            ts["reclassified"], ts["total"], ts["mixed"],
+        )
         self._log_summary(time.perf_counter() - started, result)
         return result
 

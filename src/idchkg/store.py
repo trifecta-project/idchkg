@@ -172,6 +172,7 @@ def load_sqlite(path: str | Path) -> KnowledgeGraph:
                 "descriptions": json.loads(r["descriptions"]),
                 "contexts": json.loads(r["contexts"]),
                 "dbpedia": _load_dbpedia(r),
+                "type_heuristic": (r["type_heuristic"] if "type_heuristic" in r.keys() else None),
             }
             for r in conn.execute("SELECT * FROM entities")
         ]
@@ -390,6 +391,51 @@ def enrich_sqlite(path: str | Path, linker, relink: bool = False, concurrency: i
         conn.close()
 
 
+def reclassify_types(path: str | Path) -> dict:
+    """Fill a ``type_heuristic`` column on ``entities`` (added if missing) with
+    each entity's **label-majority** type — one vote per sense-entity sharing the
+    label, ``concept`` favoured on ties. This undoes the old build's flaw where a
+    single stray mention-type mistyped a whole concept (e.g. coffee's beverage
+    sense typed ``organization`` among 55 ``concept`` senses).
+
+    Kept in a **separate column** from ``type`` so the site can opt in only if the
+    result is reliable. In-place, additive, reversible. Returns ``{total,
+    changed, low_confidence_labels}`` (changed = differ from stored ``type``;
+    low-confidence = multi-sense labels with no strict majority).
+    """
+    from collections import Counter, defaultdict
+
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    try:
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(entities)")]
+        if "type_heuristic" not in cols:
+            conn.execute("ALTER TABLE entities ADD COLUMN type_heuristic TEXT")
+        rows = conn.execute("SELECT id, label, type FROM entities").fetchall()
+
+        groups: dict = defaultdict(list)
+        for r in rows:
+            groups[(r["label"] or "").strip().casefold()].append((r["id"], r["type"]))
+
+        updates, changed, low_confidence = [], 0, 0
+        for members in groups.values():
+            counts = Counter(t for _, t in members)
+            # most-voted type; ties broken by name (so 'concept' wins).
+            plurality = min(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+            if len(members) > 1 and counts[plurality] <= len(members) / 2:
+                low_confidence += 1
+            for eid, t in members:
+                updates.append((plurality, eid))
+                if plurality != t:
+                    changed += 1
+
+        conn.executemany("UPDATE entities SET type_heuristic=? WHERE id=?", updates)
+        conn.commit()
+        return {"total": len(rows), "changed": changed, "low_confidence_labels": low_confidence}
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------
 # Row reconstruction (shared by GraphStore)
 # --------------------------------------------------------------------------
@@ -406,6 +452,7 @@ def _load_dbpedia(r) -> dict | None:
 
 
 def _entity_from_row(r) -> Entity:
+    keys = r.keys()
     return Entity(
         id=r["id"], label=r["label"], type=r["type"], sense=r["sense"],
         mention_count=r["mention_count"],
@@ -413,6 +460,8 @@ def _entity_from_row(r) -> Entity:
         descriptions=json.loads(r["descriptions"]) if r["descriptions"] else [],
         contexts=json.loads(r["contexts"]) if r["contexts"] else [],
         dbpedia=_load_dbpedia(r),
+        # Retrofit column (see reclassify_types); tolerate DBs written before it.
+        type_heuristic=(r["type_heuristic"] if "type_heuristic" in keys else None),
     )
 
 
