@@ -607,6 +607,14 @@ class GraphStore:
     def claim_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
 
+    def entity_ids_in_claims(self) -> set[str]:
+        """Ids of entities used as a claim subject or object (i.e. that have
+        claim-derived content); the complement is mention-only entities."""
+        return {
+            row[0] for row in self.conn.execute(
+                "SELECT subject_id FROM claims UNION SELECT object_id FROM claims")
+        }
+
     def perspective_stats(self) -> dict:
         """Corpus-wide stance/sentiment tallies + distinct-viewpoint count, via
         SQL GROUP BY (never materialises the claim set)."""

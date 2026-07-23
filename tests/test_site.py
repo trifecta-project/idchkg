@@ -171,7 +171,7 @@ def test_geomap_is_zoomable(tmp_path):
     store.close()
 
     store = GraphStore(tmp_path / "g.db", mode="query")
-    out = build_site(store, tmp_path / "site")
+    out = build_site(store, tmp_path / "site", claimless="keep")  # keep the lone place
     store.close()
 
     geo = (out / "geomap.html").read_text(encoding="utf-8")
@@ -210,6 +210,11 @@ def test_most_senses_section_leads_with_polysemous_entities(tmp_path):
               perspective=Perspective("writers", "asserts", "neutral"),
               provenance=Provenance("doc", "doc#c0", "coffee", "mock")),
         plant, society)
+    store.add_claim(  # so the beverage sense is also claimful (has a page)
+        Claim("coffee", "served-in", "society", subject_sense="beverage",
+              perspective=Perspective("writers", "asserts", "neutral"),
+              provenance=Provenance("doc", "doc#c1", "coffee", "mock")),
+        bev, society)
     store.finalize_entities([bev, plant, society])
     store.close()
 
@@ -406,8 +411,8 @@ def test_relationship_graph_shown_only_when_connected(tmp_path):
     store.close()
     hub_page = (out / "entity" / "ent-coffee--beverage.html").read_text(encoding="utf-8")
     assert "<h2>Connections</h2>" in hub_page and 'class="ego-svg"' in hub_page
-    lonely_page = (out / "entity" / "ent-lonely.html").read_text(encoding="utf-8")
-    assert "<h2>Connections</h2>" not in lonely_page  # isolated entity -> omitted
+    # The isolated entity has no claims -> no page at all (default claimless skip).
+    assert not (out / "entity" / "ent-lonely.html").exists()
 
 
 def test_author_viewpoint_resolves_to_book_author(tmp_path):
@@ -466,7 +471,7 @@ def test_site_uses_heuristic_type_for_commodities(tmp_path):
     reclassify_types(tmp_path / "g.db")   # fills type_heuristic = concept for all
 
     store = GraphStore(tmp_path / "g.db", mode="query")
-    out = build_site(store, tmp_path / "site")
+    out = build_site(store, tmp_path / "site", claimless="keep")  # these senses have no claims
     store.close()
     # entities.js carries the corrected type for the search facets.
     ejs = (out / "entities.js").read_text(encoding="utf-8")
@@ -489,7 +494,7 @@ def test_geomap_markers_are_clickable_links(tmp_path):
     store.finalize_entities([Entity(id="ent-zanzibar", label="Zanzibar", type="place", mention_count=3)])
     store.close()
     store = GraphStore(tmp_path / "g.db", mode="query")
-    out = build_site(store, tmp_path / "site")
+    out = build_site(store, tmp_path / "site", claimless="keep")  # keep the lone place
     store.close()
     geo = (out / "geomap.html").read_text(encoding="utf-8")
     # The marker is a real link to the entity page...
@@ -498,3 +503,54 @@ def test_geomap_markers_are_clickable_links(tmp_path):
     # would swallow the click); capture happens on drag instead.
     pointerdown = geo.split("'pointerdown'", 1)[1].split("addEventListener", 1)[0]
     assert "setPointerCapture" not in pointerdown
+
+
+def test_claimless_entities_skipped_and_logged(tmp_path):
+    store = GraphStore(tmp_path / "g.db", mode="build")
+    coffee = Entity(id="ent-coffee--beverage", label="coffee", sense="beverage", mention_count=2)
+    society = Entity(id="ent-society", label="society", mention_count=1)
+    # A mention-only sense: recorded, but never a claim subject/object.
+    ghost = Entity(id="ent-tobacco--currency", label="tobacco", sense="currency",
+                   mention_count=1, descriptions=["Tobacco used as medium of exchange"])
+    store.add_document(Document(id="d", text="Coffee refines society."))
+    store.add_claim(
+        Claim("coffee", "refines", "society",
+              perspective=Perspective("w", "asserts", "neutral"),
+              provenance=Provenance("d", "d#0", "coffee")), coffee, society)
+    store.finalize_entities([coffee, society, ghost])
+    store.close()
+
+    store = GraphStore(tmp_path / "g.db", mode="query")
+    out = build_site(store, tmp_path / "site")  # default: skip
+    store.close()
+
+    # Claimful entities have pages; the mention-only one does not.
+    assert (out / "entity" / "ent-coffee--beverage.html").exists()
+    assert not (out / "entity" / "ent-tobacco--currency.html").exists()
+    # It's absent from the search index too (no dead links).
+    assert "ent-tobacco--currency" not in (out / "entities.js").read_text(encoding="utf-8")
+    # ...and logged for later review, with its description.
+    log = (out / "claimless_entities.log").read_text(encoding="utf-8")
+    assert "ent-tobacco--currency" in log and "medium of exchange" in log
+
+
+def test_claimless_kept_with_note(tmp_path):
+    store = GraphStore(tmp_path / "g.db", mode="build")
+    coffee = Entity(id="ent-coffee--beverage", label="coffee", sense="beverage", mention_count=2)
+    society = Entity(id="ent-society", label="society", mention_count=1)
+    ghost = Entity(id="ent-tobacco--currency", label="tobacco", sense="currency", mention_count=1)
+    store.add_document(Document(id="d", text="Coffee refines society."))
+    store.add_claim(
+        Claim("coffee", "refines", "society",
+              perspective=Perspective("w", "asserts", "neutral"),
+              provenance=Provenance("d", "d#0", "coffee")), coffee, society)
+    store.finalize_entities([coffee, society, ghost])
+    store.close()
+
+    store = GraphStore(tmp_path / "g.db", mode="query")
+    out = build_site(store, tmp_path / "site", claimless="keep")
+    store.close()
+
+    page = (out / "entity" / "ent-tobacco--currency.html").read_text(encoding="utf-8")
+    assert page  # generated
+    assert "no claims about this sense entered the graph" in page

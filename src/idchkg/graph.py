@@ -147,6 +147,12 @@ class KnowledgeGraph:
     def claim_count(self) -> int:
         return len(self._claims)
 
+    def entity_ids_in_claims(self) -> set[str]:
+        """Ids of entities that appear as a claim subject or object — i.e. that
+        have claim-derived content (properties/perspectives/connections). The
+        complement is mention-only entities."""
+        return {eid for pair in self._entity_of_claim.values() for eid in pair}
+
     def perspective_stats(self) -> dict:
         """Corpus-wide stance/sentiment tallies + distinct-viewpoint count — the
         Perspective dimension, for the overview charts."""

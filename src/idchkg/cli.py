@@ -115,11 +115,11 @@ def cmd_site(args: argparse.Namespace) -> int:
 
         graph = GraphStore(args.graph, mode="query")
         try:
-            out = build_site(graph, args.out)
+            out = build_site(graph, args.out, claimless=args.claimless)
         finally:
             graph.close()
     else:
-        out = build_site(KnowledgeGraph.load_json(args.graph), args.out)
+        out = build_site(KnowledgeGraph.load_json(args.graph), args.out, claimless=args.claimless)
     print(f"Wrote static site to {out}/ — open {out}/index.html (or: python -m http.server -d {out})")
     return 0
 
@@ -303,6 +303,11 @@ def main(argv: list[str] | None = None) -> int:
     site = sub.add_parser("site", help="Generate a static web site to browse a built graph")
     site.add_argument("graph", help="Path to graph.db or graph.json")
     site.add_argument("-o", "--out", default="site", help="Output directory (default: site)")
+    site.add_argument(
+        "--claimless", choices=["skip", "keep"], default="skip",
+        help="mention-only entities (no claims): skip their pages (default) or keep them with a "
+             "note. Either way they're listed in claimless_entities.log",
+    )
     site.set_defaults(func=cmd_site)
 
     merge = sub.add_parser("merge", help="Union one graph.db into another (in place)")

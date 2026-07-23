@@ -868,7 +868,15 @@ def _render_entity(graph, entity, by_key, anchors=None, views=None) -> str:
         conflicts_html = f'<section><h2>Disagreements</h2>{"".join(blocks)}</section>'
 
     # (Stream graphs live on the dedicated /streams.html page, not per entity.)
-    body = header + senses_html + connections_html + props_html + perspectives + drift_html + conflicts_html
+    claim_content = connections_html + props_html + perspectives + drift_html + conflicts_html
+    # A mention-only entity has no claim-derived sections; say so rather than
+    # leaving a bare page (this is what the 'keep' claimless mode surfaces).
+    note = (
+        '<section><p class="muted">Recorded as a passing mention — no claims '
+        'about this sense entered the graph.</p></section>'
+        if not claim_content else ""
+    )
+    body = header + senses_html + note + claim_content
     return _page(f"{entity.label} — idchkg", body, depth=1)
 
 
@@ -1185,8 +1193,33 @@ def _render_geomap(graph, entities, by_key) -> str:
 # -------------------------------------------------------------------- build
 
 
-def build_site(graph, out_dir: str | Path) -> Path:
-    """Render the whole site for `graph` into `out_dir`. Returns the output path."""
+def _write_claimless_log(out: Path, claimless_ents: list, mode: str) -> None:
+    """Record mention-only (claim-less) entities for later review."""
+    if not claimless_ents:
+        return
+    verb = "omitted from" if mode == "skip" else "kept in"
+    lines = [
+        f"# Mention-only entities (no claims) — {verb} the site.",
+        "# Fields: mention_count\tsense\tid\tlabel\tdescription",
+    ]
+    lines += [
+        f"{e.mention_count}\t{e.sense}\t{e.id}\t{e.label}\t"
+        f"{(e.descriptions[0] if e.descriptions else '')}"
+        for e in claimless_ents
+    ]
+    (out / "claimless_entities.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    logger.info("%d mention-only entit%s %s the site; see claimless_entities.log",
+                len(claimless_ents), "y" if len(claimless_ents) == 1 else "ies",
+                "omitted from" if mode == "skip" else "kept in")
+
+
+def build_site(graph, out_dir: str | Path, claimless: str = "skip") -> Path:
+    """Render the whole site for `graph` into `out_dir`. Returns the output path.
+
+    `claimless` controls entities with no claims (no properties/perspectives/
+    connections — mention-only nodes): "skip" (default) omits their pages and
+    every reference to them; "keep" renders them with an explanatory note. Either
+    way the omitted/kept set is written to `claimless_entities.log`."""
     out = Path(out_dir)
     (out / "entity").mkdir(parents=True, exist_ok=True)
     (out / "doc").mkdir(parents=True, exist_ok=True)
@@ -1203,6 +1236,16 @@ def build_site(graph, out_dir: str | Path) -> Path:
     # because they are absent from by_key.
     entities = [e for e in all_entities if not _filename_too_long(e)]
     skipped = [e for e in all_entities if _filename_too_long(e)]
+
+    # Mention-only entities (never a claim subject/object) have empty pages; by
+    # default drop them from the whole site so there are no dead-end pages or
+    # dangling references. Always logged for later review.
+    claimful = graph.entity_ids_in_claims()
+    claimless_ents = [e for e in entities if e.id not in claimful]
+    if claimless == "skip":
+        entities = [e for e in entities if e.id in claimful]
+    _write_claimless_log(out, claimless_ents, claimless)
+
     by_key = {_key(e.label, e.sense): e for e in entities}
     # Group entities by canonical label once, so cross-links and the sense
     # switcher resolve in O(1) instead of scanning all entities per lookup.
