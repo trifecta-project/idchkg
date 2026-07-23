@@ -371,7 +371,7 @@ def test_disagreements_page(tmp_path):
     page = (out / "disagreements.html").read_text(encoding="utf-8")
     assert "<h1>Disagreements</h1>" in page
     assert "conflict-claims" in page
-    assert 'href="disagreements.html">Disputes</a>' in page  # nav link present
+    assert 'href="disagreements.html">Disagreements</a>' in page  # nav link present
 
 
 def test_sources_page(tmp_path):

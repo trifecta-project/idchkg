@@ -167,7 +167,10 @@ def _page(title: str, body: str, depth: int) -> str:
 <a class="brand-logo-link" href="https://trifecta.dhlab.nl" title="TRIFECTA — trifecta.dhlab.nl"><img class="brand-logo" src="{up}assets/trifecta-logo.png" alt="TRIFECTA" width="54" height="60"></a>
 <a class="brand-name" href="{up}index.html">idchkg</a></div>
 <span class="tagline">An Unflattened Identity and Change Knowledge Graph</span>
-<nav><a href="{up}index.html">Browse</a> <a href="{up}timeline.html">Timeline</a> <a href="{up}streams.html">Streams</a> <a href="{up}disagreements.html">Disputes</a> <a href="{up}sources.html">Sources</a> <a href="{up}heatmap.html">Heatmap</a> <a href="{up}geomap.html">Map</a></nav></div></header>
+<nav>
+<span class="nav-row"><a href="{up}index.html">Browse</a> <a href="{up}timeline.html">Timeline</a> <a href="{up}streams.html">Streams</a></span>
+<span class="nav-row"><a href="{up}disagreements.html">Disagreements</a> <a href="{up}sources.html">Sources</a> <a href="{up}geomap.html">Map</a></span>
+</nav></div></header>
 <main class="wrap">
 {body}
 </main>
@@ -824,46 +827,6 @@ def _render_entity(graph, entity, by_key, anchors=None, views=None) -> str:
     return _page(f"{entity.label} — idchkg", body, depth=1)
 
 
-def _render_heatmap(graph, entities, by_key) -> str:
-    """A heatmap page: the most-mentioned entities as tiles coloured by frequency
-    (capped, so it stays legible on very large graphs)."""
-    if not entities:
-        return _page("Heatmap — idchkg", '<p class="muted">No entities.</p>', depth=0)
-
-    entities = sorted(entities, key=lambda e: -e.mention_count)[:150]
-    max_count = max(e.mention_count for e in entities)
-    min_count = min(e.mention_count for e in entities)
-    span = max(max_count - min_count, 1)
-
-    tiles = []
-    for e in entities:
-        t = (e.mention_count - min_count) / span  # 0..1, 1 = hottest
-        sense = f' <em>({_esc(e.sense)})</em>' if e.sense else ""
-        tiles.append(
-            f'<a class="hm-tile" href="entity/{_esc(e.id)}.html" '
-            f'style="--heat:{t:.3f}" title="{_esc(e.label)}: {e.mention_count} mentions">'
-            f'<span class="hm-label">{_esc(e.label)}{sense}</span>'
-            f'<span class="hm-count">{e.mention_count}</span></a>'
-        )
-
-    legend = (
-        '<div class="hm-legend">'
-        f'<span class="hm-lo">{min_count}</span>'
-        '<span class="hm-bar"></span>'
-        f'<span class="hm-hi">{max_count}</span>'
-        '<span class="muted" style="margin-left:8px">mentions</span>'
-        '</div>'
-    )
-
-    body = (
-        '<section class="intro"><h1>Entity heatmap</h1>'
-        '<p>Entities sized and coloured by how often they appear in the corpus — '
-        'brighter tiles are mentioned more frequently.</p></section>'
-        f'{legend}<div class="hm-grid">{"".join(tiles)}</div>'
-    )
-    return _page("Heatmap — idchkg", body, depth=0)
-
-
 # Common place names → (lat, lon).  Equirectangular projection: x = lon, y = -lat.
 _GEOCODE: dict[str, tuple[float, float]] = {
     "amsterdam": (52.37, 4.90), "athens": (37.98, 23.73), "baghdad": (33.31, 44.37),
@@ -1195,7 +1158,6 @@ def build_site(graph, out_dir: str | Path) -> Path:
     (out / "streams.html").write_text(_render_streams(graph), encoding="utf-8")
     (out / "disagreements.html").write_text(_render_disagreements(graph, by_key), encoding="utf-8")
     (out / "sources.html").write_text(_render_sources(graph, documents), encoding="utf-8")
-    (out / "heatmap.html").write_text(_render_heatmap(graph, entities, by_key), encoding="utf-8")
     (out / "geomap.html").write_text(_render_geomap(graph, entities, by_key), encoding="utf-8")
     for entity in entities:
         # Build this entity's claim subgraph once and reuse it for all four
@@ -1393,7 +1355,11 @@ li.claim:last-child{border-bottom:0}
 .src-doc{color:var(--accent);font-size:.78rem;white-space:nowrap}
 .src-doc::before{content:"↳ ";color:var(--muted)}
 .src-doc:hover{text-decoration:underline}
-header.site nav{margin-left:auto;display:flex;gap:18px;font-size:.92rem}
+header.site nav{margin-left:auto;display:flex;flex-direction:column;align-items:flex-end;gap:5px;font-size:.92rem}
+.nav-row{display:flex;gap:18px}
+/* running-bond: offset the second row by ~half a link so the joints stagger */
+.nav-row+.nav-row{margin-right:2.2em}
+@media(max-width:600px){header.site nav{align-items:flex-start}.nav-row+.nav-row{margin-right:0;margin-left:2.2em}}
 blockquote{margin:.4em 0;padding:.3em 0 .3em .8em;border-left:3px solid var(--line);
   color:#444;font-size:.92rem}
 blockquote::before{content:"“"}blockquote::after{content:"”"}
@@ -1436,22 +1402,10 @@ ul.conflict-claims li{padding:.2em 0}
   stroke:#fff;stroke-width:1;cursor:pointer;transition:r .15s}
 .geo-dot:hover{r:20;fill-opacity:1}
 .geo-axis{font-size:9px;fill:var(--muted);dominant-baseline:middle}
-/* heatmap */
+/* frequency legend (shared by the geographical map) */
 .hm-legend{display:flex;align-items:center;gap:6px;margin:1.2em 0 .8em;font-size:.82rem;color:var(--muted)}
 .hm-bar{display:inline-block;width:120px;height:12px;border-radius:6px;
   background:linear-gradient(90deg,#e8e4df,#f0c26b,#e07340,#b4472f)}
 .hm-lo,.hm-hi{font-weight:600;color:var(--ink)}
-.hm-grid{display:flex;flex-wrap:wrap;gap:6px}
-.hm-tile{display:flex;flex-direction:column;align-items:center;justify-content:center;
-  padding:10px 14px;border-radius:8px;text-decoration:none;
-  min-width:80px;min-height:56px;
-  background:color-mix(in srgb,#b4472f calc(var(--heat)*100%),#e8e4df);
-  color:color-mix(in srgb,#fff calc(var(--heat)*100%),var(--ink));
-  border:1px solid color-mix(in srgb,#b4472f calc(var(--heat)*60%),var(--line));
-  transition:transform .12s}
-.hm-tile:hover{transform:scale(1.06);text-decoration:none}
-.hm-label{font-size:.82rem;font-weight:600;text-align:center;line-height:1.2}
-.hm-label em{font-style:normal;font-weight:400;font-size:.72rem;opacity:.85}
-.hm-count{font-size:.72rem;margin-top:2px;opacity:.8}
 @media(max-width:600px){ul.entity-list{columns:1}html{font-size:16px}}
 """
