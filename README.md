@@ -1,30 +1,27 @@
 # idchkg
 
-A **local, LLM-based knowledge-graph pipeline with built-in judges**, inspired by
-Marieke van Erp's vision paper *"Unflattening Knowledge Graphs"* (K-CAP 2023,
+A **LLM-based knowledge-graph pipeline for building thick knowledge graphs**, based on the vision paper *"Unflattening Knowledge Graphs"* (K-CAP 2023,
 [DOI 10.1145/3587259.3630082](https://doi.org/10.1145/3587259.3630082)).
 
-Most knowledge graphs *flatten* the world into bare `(subject, predicate, object)`
-triples. The paper's running example is *coffee*: Wikidata represents it as a
+Most knowledge graphs *flatten* the world into `(subject, predicate, object)`
+triples. For example, Wikidata represents  *coffee*:  as a
 "brewed beverage made from seeds of Coffea genus", so we cannot tell apart a
 reference to the drink, the plant, the activity of drinking it, or the colonial
-commodity — and its history is entirely absent from the structured data. The
-paper names **three crucial challenges** for "unflattening" KGs, and this
-project is built around them:
+commodity. Its history is  absent from the structured data.
+
+The vision paper identifies **three crucial challenges** for "unflattening" KGs:
 
 | Paper's challenge | How this project addresses it |
 | --- | --- |
 | **1. Identity** — concepts have many dimensions; `owl:sameAs` over-merges | entities are keyed by **(label, sense)**, so coffee-the-plant, coffee-the-beverage and coffee-the-commodity are **distinct nodes** joined by context-scoped **near-identity** links, not one flat node |
-| **2. Change** — identities drift, split, merge, cease | claims carry a `TemporalScope`; the graph exposes **drift** over time and records **evolution events** (split / merge / cease / gains / loses) |
+| **2. Change** — identities drift, split, merge, cease | claims carry a `TemporalScope`; |
 | **3. The long tail** — infrequent entities vanish without provenance | every claim stores full **`Provenance`** (source, quote, judge verdicts) and entities keep a **mention count** to separate head from long-tail |
 
 Extraction is done by an LLM, and every extracted claim is reviewed by
 **built-in LLM judges** before it can enter the graph.
 
 > **Complementary dimension.** Each claim also carries a `Perspective`
-> (viewpoint / stance / sentiment). That isn't one of the paper's three named
-> challenges, but it follows from its remark that concepts "connect to many
-> different narratives with different opinions", and it lets the graph keep
+> (viewpoint / stance / sentiment). It lets the graph keep
 > disagreements (e.g. colonial writers vs. historians on coffee) side by side.
 
 ## Pipeline
