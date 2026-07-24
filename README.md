@@ -314,18 +314,3 @@ pytest
 The suite runs entirely offline using the scriptable mock backend — no model
 calls, no network.
 
-## Notes and next steps
-
-This is a working foundation, not a finished product. Mapped to the paper's
-challenges, the natural extensions are:
-
-- **Identity** — an LLM **identity/merge judge** that decides context-scoped
-  `sameAs` over *sets of properties* (as the paper's cited work proposes),
-  rather than the current deterministic (label, sense) keying;
-- **Change** — automatic **concept-drift detection** (split/merge/cease) from
-  the time-bucketed claims, instead of only hand-recorded evolution events;
-  richer temporal normalisation via a dedicated date-parsing pass;
-- **Long tail** — **knowledge enrichment** that fills gaps for infrequent
-  entities by borrowing properties from similar, better-attested ones;
-- **Engineering** — concurrency across chunks, and a persistent backend
-  (SQLite or an RDF store) behind the same graph API.
