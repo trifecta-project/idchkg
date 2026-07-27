@@ -399,11 +399,24 @@ def _render_index(graph, entities, by_key, documents) -> str:
         for d in documents
     )
     documents_section = (
-        f'<section><h2>Documents</h2><p class="muted">The sources — every claim links back to one.</p>'
+        f'<section><h2>Documents</h2><p class="muted" id="documents">The sources — every claim links back to one.</p>'
         f'<ul class="entity-list">{doc_items}</ul></section>' if doc_items else ""
     )
 
+    intro = (
+        '<section class="intro"><h1>Introduction</h1><p>'
+        "This demo showcases the concept of &#39;thick knowledge graphs&#39; as defined in the "
+        '<a href="https://trifecta.dhlab.nl">Trifecta project</a>, meaning a knowledge graph in '
+        "which entities are contextualised. This demo was created with data from 18th and 19th "
+        "century books on commodities trade, as well as a selection of Wikipedia articles, a "
+        'complete list can be found in <a href="#documents">Documents</a> at the bottom of this '
+        "page. The codebase for this demo can be found at "
+        '<a href="https://github.com/trifecta-project/idchkg">https://github.com/trifecta-project/idchkg</a>.'
+        "</p></section>"
+    )
+
     body = (
+        f"{intro}"
         '<section class="intro"><h1>Browse the knowledge graph</h1>'
         "<p>The same concept can be a plant, a drink, and a colonial commodity at once. "
         "Here concepts are kept as distinct <em>senses</em>, and every claim carries the "
