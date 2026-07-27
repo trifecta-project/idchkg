@@ -224,7 +224,7 @@ def _page(title: str, body: str, depth: int) -> str:
 <img class="erc-logo" src="{up}assets/erc-logo.png" alt="Funded by the European Union — European Research Council" width="240" height="101">
 <p>Funded by the European Union under grant agreement 101088548 — TRIFECTA. Views and opinions expressed are however those of the author only and do not necessarily reflect those of the European Union or the European Research Council. Neither the European Union nor the granting authority can be held responsible for them.</p>
 </div>
-<p class="colophon">An <a href="https://indelab.org/">INDE lab</a> x <a href="https://dhlab.nl">DHLab</a> collab</p>
+<p class="colophon">An <a href="https://indelab.org/">INDE lab</a> x <a href="https://dhlab.nl">DHLab</a> collab - 2026.</p>
 </div></footer>
 </body>
 </html>
@@ -1383,7 +1383,7 @@ footer.site .wrap{padding:26px 24px}
 .funding{display:flex;align-items:center;gap:18px;padding-bottom:16px;margin-bottom:14px;border-bottom:1px solid var(--line)}
 .erc-logo{flex:0 0 auto;height:56px;width:auto;display:block}
 .funding p{margin:0;font-size:.78rem;line-height:1.5;color:var(--muted)}
-.colophon{margin:0}
+.colophon{margin:0;text-align:center}
 @media(max-width:560px){.funding{flex-direction:column;align-items:flex-start;gap:10px}}
 main.wrap{padding-top:36px;padding-bottom:36px}
 h1{font-size:2rem;line-height:1.2;margin:.2em 0 .3em}
