@@ -173,6 +173,7 @@ def load_sqlite(path: str | Path) -> KnowledgeGraph:
                 "contexts": json.loads(r["contexts"]),
                 "dbpedia": _load_dbpedia(r),
                 "type_heuristic": (r["type_heuristic"] if "type_heuristic" in r.keys() else None),
+                "wikidata": _load_json_col(r, "wikidata"),
             }
             for r in conn.execute("SELECT * FROM entities")
         ]
@@ -391,6 +392,52 @@ def enrich_sqlite(path: str | Path, linker, relink: bool = False, concurrency: i
         conn.close()
 
 
+def enrich_wikidata_sqlite(
+    path: str | Path,
+    linker,
+    types: list[str] | None = None,
+    relink: bool = False,
+    concurrency: int = 4,
+    limit: int | None = None,
+) -> int:
+    """Link an existing graph.db's entities to Wikidata in place, adding the
+    retrofit ``wikidata`` JSON column if missing (an ``ALTER TABLE`` migration,
+    like ``enrich_sqlite`` does for ``dbpedia``). Returns the number newly linked.
+
+    ``types`` restricts to entity types (e.g. ``["place"]``); ``limit`` links only
+    the N most-mentioned eligible entities (head first, long tail later).
+    ``linker`` is a ``WikidataLinker`` (or anything with ``link_entities``).
+    """
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    try:
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(entities)")]
+        if "wikidata" not in cols:
+            conn.execute("ALTER TABLE entities ADD COLUMN wikidata TEXT")
+            conn.commit()
+        sql = "SELECT * FROM entities"
+        params: list = []
+        if types:
+            sql += f" WHERE type IN ({','.join('?' * len(types))})"
+            params = list(types)
+        sql += " ORDER BY mention_count DESC, id"
+        rows = conn.execute(sql, params).fetchall()
+        todo = [_entity_from_row(r) for r in rows if relink or not _load_json_col(r, "wikidata")]
+        if limit is not None:
+            todo = todo[:limit]
+        linked = linker.link_entities(todo, concurrency=concurrency)
+        for entity in todo:
+            if entity.wikidata:
+                conn.execute(
+                    "UPDATE entities SET wikidata=? WHERE id=?",
+                    (json.dumps(entity.wikidata, ensure_ascii=False), entity.id),
+                )
+        conn.commit()
+        return linked
+    finally:
+        conn.close()
+
+
 def reclassify_types(path: str | Path) -> dict:
     """Fill a ``type_heuristic`` column on ``entities`` (added if missing) with
     each entity's **label-majority** type — one vote per sense-entity sharing the
@@ -451,6 +498,16 @@ def _load_dbpedia(r) -> dict | None:
         return None
 
 
+def _load_json_col(r, col: str) -> dict | None:
+    """Parse an optional JSON column, tolerating DBs that predate it."""
+    if col not in r.keys() or not r[col]:
+        return None
+    try:
+        return json.loads(r[col])
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
 def _entity_from_row(r) -> Entity:
     keys = r.keys()
     return Entity(
@@ -462,6 +519,8 @@ def _entity_from_row(r) -> Entity:
         dbpedia=_load_dbpedia(r),
         # Retrofit column (see reclassify_types); tolerate DBs written before it.
         type_heuristic=(r["type_heuristic"] if "type_heuristic" in keys else None),
+        # Retrofit column (see enrich_wikidata_sqlite); tolerate its absence.
+        wikidata=_load_json_col(r, "wikidata"),
     )
 
 

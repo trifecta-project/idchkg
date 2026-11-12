@@ -140,6 +140,10 @@ class Entity:
     # Heuristic label-majority type (optional, set by `idchkg reclassify-types`).
     # Kept separate from `type` so the site can opt in only if it proves reliable.
     type_heuristic: str | None = None
+    # Wikidata link (optional, set by `idchkg link --target wikidata`; retrofit
+    # column on graph.db): {"qid", "label", "description", "score", "margin",
+    # "types", "coord": [lat, lon] | None, "start", "end"} or None when unlinked.
+    wikidata: dict | None = None
 
 
 @dataclass

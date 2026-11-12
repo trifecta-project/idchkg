@@ -447,6 +447,7 @@ class KnowledgeGraph:
                 mention_count=item.get("mention_count", 0),
                 dbpedia=item.get("dbpedia"),
                 type_heuristic=item.get("type_heuristic"),
+                wikidata=item.get("wikidata"),
             )
             entities[entity.id] = entity
             kg.add_entity(entity)

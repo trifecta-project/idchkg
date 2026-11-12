@@ -125,13 +125,26 @@ def cmd_site(args: argparse.Namespace) -> int:
 
 
 def cmd_link(args: argparse.Namespace) -> int:
-    """Enrich an existing graph.db by linking its entities to DBpedia in place."""
-    from .link import DBpediaLinker
-    from .store import enrich_sqlite
-
+    """Enrich an existing graph.db by linking its entities to DBpedia (default)
+    or Wikidata, in place."""
     if not str(args.db).endswith(".db"):
         print("link operates on a graph.db (SQLite) file.", file=sys.stderr)
         return 1
+    if args.target == "wikidata":
+        from .store import enrich_wikidata_sqlite
+        from .wikidata import WikidataLinker
+
+        cache = args.cache or str(Path(args.db).with_name("wikidata_cache.json"))
+        linker = WikidataLinker(cache_path=cache, min_score=args.min_score)
+        types = [t.strip() for t in args.types.split(",")] if args.types else None
+        print(f"Linking entities in {args.db} to Wikidata (sends entity labels to wikidata.org; cache: {cache})...")
+        n = enrich_wikidata_sqlite(args.db, linker, types=types, relink=args.relink,
+                                   concurrency=min(args.concurrency, 4), limit=args.limit)
+        print(f"Linked {n} entit{'y' if n == 1 else 'ies'} to Wikidata.")
+        return 0
+
+    from .link import DBpediaLinker
+    from .store import enrich_sqlite
     kwargs = {"confidence": args.spotlight_confidence}
     if args.spotlight_url:
         kwargs["spotlight_url"] = args.spotlight_url
@@ -315,8 +328,14 @@ def main(argv: list[str] | None = None) -> int:
     merge.add_argument("dst", help="Destination graph.db to merge INTO (modified in place)")
     merge.set_defaults(func=cmd_merge)
 
-    link = sub.add_parser("link", help="Link an existing graph.db's entities to DBpedia (in place)")
+    link = sub.add_parser("link", help="Link an existing graph.db's entities to DBpedia or Wikidata (in place)")
     link.add_argument("db", help="Path to graph.db")
+    link.add_argument("--target", choices=["dbpedia", "wikidata"], default="dbpedia",
+                      help="Knowledge base to link to (default: dbpedia)")
+    link.add_argument("--types", default=None, help="[wikidata] comma-separated entity types to link, e.g. 'place'")
+    link.add_argument("--limit", type=int, default=None, help="[wikidata] link only the N most-mentioned entities")
+    link.add_argument("--min-score", type=float, default=2.0, help="[wikidata] acceptance score cutoff (default: 2.0)")
+    link.add_argument("--cache", default=None, help="[wikidata] JSON response cache (default: wikidata_cache.json next to the db)")
     link.add_argument("--spotlight-url", default=None, help="Spotlight REST base URL (default: public api.dbpedia-spotlight.org/en)")
     link.add_argument("--spotlight-confidence", type=float, default=0.5, help="Spotlight/link confidence cutoff (default: 0.5)")
     link.add_argument("--relink", action="store_true", help="Re-link entities that already have a DBpedia link")
