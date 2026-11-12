@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>idchkg Atlas</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
+<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/deck.gl@9.4.1/dist.min.js"></script>
+<style>
+:root {
+  --bg: #f7f6f2; --panel: #ffffff; --ink: #1d2327; --muted: #6b7377; --line: #e2e0d8;
+  --accent: #2b6cb0; --assert: #2b6cb0; --dispute: #c2410c; --question: #a16207;
+  --sense: #7c3aed; --bar: #9fb6cf; --bar-on: #2b6cb0; --space: #dfe4ea;
+  --ocean: #d6e0e8; --land: #fbfaf6; --border: #d3d0c6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14171a; --panel: #1c2024; --ink: #e6e8ea; --muted: #9aa3a9; --line: #2c3237;
+    --accent: #6ea8e8; --assert: #6ea8e8; --dispute: #f08a4b; --question: #e0b84a;
+    --sense: #b493f5; --bar: #3a4a5c; --bar-on: #6ea8e8; --space: #07090c;
+    --ocean: #1b2733; --land: #2a3138; --border: #3c454d; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+    --bg: #14171a; --panel: #1c2024; --ink: #e6e8ea; --muted: #9aa3a9; --line: #2c3237;
+    --accent: #6ea8e8; --assert: #6ea8e8; --dispute: #f08a4b; --question: #e0b84a;
+    --sense: #b493f5; --bar: #3a4a5c; --bar-on: #6ea8e8; --space: #07090c;
+    --ocean: #1b2733; --land: #2a3138; --border: #3c454d; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+#app { display: grid; height: 100%; grid-template-columns: 270px 1fr 380px;
+  grid-template-rows: 44px 1fr 110px; grid-template-areas: "hd hd hd" "fl map det" "fl tl det"; }
+header { grid-area: hd; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 0 16px;
+  border-bottom: 1px solid var(--line); background: var(--panel); }
+header h1 { font-size: 15px; margin: 0; font-weight: 650; }
+header .stats { color: var(--muted); font-size: 13px; margin-left: auto; font-variant-numeric: tabular-nums; }
+#filters { grid-area: fl; overflow-y: auto; padding: 12px 14px; border-right: 1px solid var(--line); background: var(--panel); }
+#map { grid-area: map; background: var(--space); }
+#proj { margin-left: 8px; }
+#timeline { grid-area: tl; border-top: 1px solid var(--line); background: var(--panel); padding: 6px 12px; position: relative; }
+#detail { grid-area: det; overflow-y: auto; padding: 12px 14px; border-left: 1px solid var(--line); background: var(--panel); }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 16px 0 6px; font-weight: 600; }
+h2:first-child { margin-top: 0; }
+label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+input[type=search], select { width: 100%; padding: 5px 7px; border: 1px solid var(--line); border-radius: 5px;
+  background: var(--bg); color: var(--ink); font: inherit; }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+.row { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip { border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; cursor: pointer; font-size: 12.5px;
+  background: var(--bg); color: var(--ink); user-select: none; }
+.chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+button { font: inherit; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 5px; padding: 3px 9px; cursor: pointer; }
+.legend div { display: flex; align-items: center; gap: 7px; font-size: 12.5px; margin: 3px 0; }
+.sw { width: 12px; height: 12px; border-radius: 50%; display: inline-block; flex: none; }
+.claim { border-top: 1px solid var(--line); padding: 8px 0; }
+.claim .spo { font-weight: 550; }
+.claim blockquote { margin: 4px 0; padding-left: 8px; border-left: 3px solid var(--line); color: var(--muted); font-size: 12.5px; }
+.tag { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 3px; border: 1px solid currentColor; margin-right: 4px; }
+.t-asserts { color: var(--assert); } .t-disputes { color: var(--dispute); } .t-questions { color: var(--question); }
+.vp { margin-top: 12px; font-weight: 600; font-size: 13px; color: var(--accent); }
+.senses li { margin: 4px 0; }
+.senses a { color: var(--accent); }
+.maplibregl-popup-content { background: var(--panel); color: var(--ink); font-size: 12.5px; padding: 6px 9px; }
+#tl-svg { width: 100%; height: 72px; display: block; }
+#tl-svg rect { cursor: pointer; }
+.tl-head { display: flex; align-items: center; gap: 10px; font-size: 12.5px; }
+@media (max-width: 900px) {
+  /* Phone: map first, then the timeline, the selected place's claims, and the filters. */
+  #app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 62vh auto auto auto;
+    grid-template-areas: "hd" "map" "tl" "det" "fl"; height: auto; }
+  header { padding-block: 8px; }
+  header .stats { margin-left: 0; width: 100%; }
+  #filters, #detail { border: 0; border-top: 1px solid var(--line); overflow: visible; }
+  #detail { min-height: 120px; }
+  .tl-head .muted { display: none; }
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <header><h1>idchkg Atlas</h1><span class="muted small">places · perspectives · time</span><button id="proj" title="Switch between a 3D globe and a flat map">Flat map</button><span class="stats" id="stats"></span></header>
+  <aside id="filters">
+    <h2>Find a place</h2>
+    <input type="search" id="q" placeholder="e.g. Java, Mocha, Ceylon" list="placelist">
+    <datalist id="placelist"></datalist>
+    <h2>Commodity</h2>
+    <div class="chips" id="commod"></div>
+    <h2>Stance</h2>
+    <div class="chips" id="stance"></div>
+    <h2>Viewpoint</h2>
+    <select id="vp"></select>
+    <h2>Time</h2>
+    <label class="small"><input type="checkbox" id="undated" checked> include undated claims</label>
+    <h2>Long tail</h2>
+    <label class="small"><input type="checkbox" id="tail"> only rarely-mentioned places</label>
+    <h2>Arcs</h2>
+    <label class="small"><input type="checkbox" id="arcs" checked> place-to-place claims</label>
+    <h2>Legend</h2>
+    <div class="legend">
+      <div><span class="sw" style="background:var(--assert)"></span>consensus (only assertions)</div>
+      <div><span class="sw" style="background:var(--dispute)"></span>contested (disputes or questions)</div>
+      <div><span class="sw" style="border:2px solid var(--sense)"></span>3+ distinct senses at this location</div>
+      <div class="muted">Size = number of matching claims</div>
+    </div>
+    <p class="muted small" style="margin-top:16px">Prototype. Places are linked to Wikidata for their coordinates, with a small built-in gazetteer as fallback. Years are parsed from the claims' free-text time expressions.</p>
+  </aside>
+  <div id="map"></div>
+  <section id="timeline">
+    <div class="tl-head">
+      <button id="play" title="Animate a sliding time window">▶ Play</button>
+      <span id="range-label" style="font-variant-numeric: tabular-nums"></span>
+      <button id="reset-time">All years</button>
+      <span class="muted small" style="margin-left:auto">click a bar to focus that period · shift-click to extend</span>
+    </div>
+    <svg id="tl-svg" preserveAspectRatio="none"></svg>
+  </section>
+  <aside id="detail"><p class="muted">Click a place or an arc to see its claims, grouped by who is speaking. Each claim comes with its source quote.</p></aside>
+</div>
+<script>
+const DATA = /*__DATA__*/null;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+const sites = DATA.sites, claims = DATA.claims;
+const years = claims.map((c) => c.y).filter((y) => y != null).sort((a, b) => a - b);
+// Trim extreme outliers so the timeline isn't dominated by a few stray years.
+const Y0 = Math.floor(years[Math.floor(years.length * 0.01)] / 10) * 10;
+const Y1 = Math.ceil((years[Math.floor(years.length * 0.995)] + 1) / 10) * 10;
+const BIN = 10;
+const mentionsSorted = sites.map((s) => s.mentions).sort((a, b) => a - b);
+const TAIL = mentionsSorted[Math.floor(mentionsSorted.length * 0.6)];
+
+const state = { commod: new Set(), stance: new Set(["asserts", "disputes", "questions"]),
+  vp: "", y0: Y0, y1: Y1, undated: true, tail: false, arcs: true, selected: null };
+
+// ---- filter controls -------------------------------------------------------
+function chips(el, values, set, labeler = (v) => v) {
+  el.innerHTML = values.map((v) => `<span class="chip${set.has(v) ? " on" : ""}" data-v="${esc(v)}">${esc(labeler(v))}</span>`).join("");
+  el.onclick = (e) => { const v = e.target.dataset?.v; if (!v) return;
+    set.has(v) ? set.delete(v) : set.add(v); e.target.classList.toggle("on"); update(); };
+}
+chips($("commod"), DATA.commodities, state.commod);
+chips($("stance"), ["asserts", "disputes", "questions"], state.stance);
+const vpCount = {};
+claims.forEach((c) => (vpCount[c.v] = (vpCount[c.v] || 0) + 1));
+const vps = Object.entries(vpCount).sort((a, b) => b[1] - a[1]).slice(0, 60);
+$("vp").innerHTML = `<option value="">All viewpoints (${Object.keys(vpCount).length})</option>` +
+  vps.map(([v, n]) => `<option value="${esc(v)}">${esc(v)} (${n})</option>`).join("");
+$("vp").onchange = (e) => { state.vp = e.target.value; update(); };
+$("undated").onchange = (e) => { state.undated = e.target.checked; update(); };
+$("tail").onchange = (e) => { state.tail = e.target.checked; update(); };
+$("arcs").onchange = (e) => { state.arcs = e.target.checked; update(); };
+$("placelist").innerHTML = [...new Set(sites.flatMap((s) => s.senses.map((p) => p.label)))].sort()
+  .map((l) => `<option value="${esc(l)}">`).join("");
+$("q").onchange = (e) => {
+  const q = e.target.value.trim().toLowerCase(); if (!q) return;
+  const s = sites.find((s) => s.senses.some((p) => p.label.toLowerCase() === q)) ||
+            sites.find((s) => s.senses.some((p) => p.label.toLowerCase().includes(q)));
+  if (s) { map.flyTo({ center: [s.lon, s.lat], zoom: Math.max(map.getZoom(), 4) }); select({ site: s.i }); }
+};
+
+// ---- filtering -------------------------------------------------------------
+function passesNonTime(c) {
+  if (!state.stance.has(c.st)) return false;
+  if (state.vp && c.v !== state.vp) return false;
+  if (state.commod.size && !c.c.some((x) => state.commod.has(x))) return false;
+  if (state.tail) {
+    const ok = (i) => i != null && sites[i].mentions <= TAIL;
+    if (!ok(c.a) && !ok(c.b)) return false;
+  }
+  return true;
+}
+const passesTime = (c) => c.y == null ? state.undated : c.y >= state.y0 && c.y < state.y1;
+
+// ---- map -------------------------------------------------------------------
+const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+// An inline basemap (Natural Earth outlines) is embedded when the page must not fetch
+// anything, e.g. as a claude.ai artifact; otherwise use CARTO's vector basemap.
+const LAND = /*__LAND__*/null;
+const style = LAND ? { version: 8, sources: { land: { type: "geojson", data: LAND } }, layers: [
+    { id: "ocean", type: "background", paint: { "background-color": css("--ocean") } },
+    { id: "land", type: "fill", source: "land", paint: { "fill-color": css("--land") } },
+    { id: "borders", type: "line", source: "land", paint: { "line-color": css("--border"), "line-width": 0.6 } } ] }
+  : `https://basemaps.cartocdn.com/gl/${dark ? "dark-matter" : "positron"}-gl-style/style.json`;
+const map = new maplibregl.Map({
+  container: "map", style,
+  center: [30, 15], zoom: 2.1, attributionControl: { compact: true },
+});
+map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
+let globe = true;
+function applyProjection() {
+  map.setProjection({ type: globe ? "globe" : "mercator" });
+  $("proj").textContent = globe ? "Flat map" : "Globe";
+  if (overlay) overlay.setProps({ layers: overlayLayers() });
+}
+$("proj").onclick = () => { globe = !globe; applyProjection(); };
+
+// Raised 3D arcs, drawn by deck.gl interleaved into the MapLibre canvas. deck's ArcLayer does not
+// render on a globe (deck 9.4), so arcs are explicit 3D paths: great-circle points lifted by a
+// sine-shaped altitude proportional to the distance.
+const R = Math.PI / 180, EARTH = 6371000;
+function arcPath(a, b, lift) {
+  const [l1, p1, l2, p2] = [a.lon * R, a.lat * R, b.lon * R, b.lat * R];
+  const d = 2 * Math.asin(Math.sqrt(Math.sin((p2 - p1) / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin((l2 - l1) / 2) ** 2));
+  if (d < 1e-6) return [[a.lon, a.lat], [b.lon, b.lat]];
+  const n = Math.max(8, Math.ceil(d * 30)), pts = [];
+  let prev = null;
+  for (let i = 0; i <= n; i++) {
+    const f = i / n, A = Math.sin((1 - f) * d) / Math.sin(d), B = Math.sin(f * d) / Math.sin(d);
+    const x = A * Math.cos(p1) * Math.cos(l1) + B * Math.cos(p2) * Math.cos(l2);
+    const y = A * Math.cos(p1) * Math.sin(l1) + B * Math.cos(p2) * Math.sin(l2);
+    const z = A * Math.sin(p1) + B * Math.sin(p2);
+    let lon = Math.atan2(y, x) / R;
+    if (prev != null) while (lon - prev > 180) lon -= 360; while (prev != null && prev - lon > 180) lon += 360;
+    prev = lon;
+    pts.push([lon, Math.atan2(z, Math.hypot(x, y)) / R, Math.sin(Math.PI * f) * d * EARTH * lift]);
+  }
+  return pts;
+}
+const rgb = (v, a = 255) => { const h = css(v).replace("#", ""); return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)).concat(a); };
+let overlay = null, arcData = [], pop = null;
+let labelData = [];
+function overlayLayers() {
+  const layers = arcLayers();
+  if (LAND) layers.push(new deck.TextLayer({
+    id: "labels", data: labelData, getPosition: (f) => f.geometry.coordinates, getText: (f) => f.properties.name,
+    getSize: 11, getColor: rgb("--ink"), getPixelOffset: [0, 14], fontFamily: "system-ui, -apple-system, sans-serif",
+    outlineWidth: 3, outlineColor: rgb("--panel"), fontSettings: { sdf: true }, characterSet: "auto",
+    parameters: { depthCompare: "always" } }));
+  return layers;
+}
+function arcLayers() {
+  if (!state.arcs) return [];
+  const lift = globe ? 0.18 : 0.12;
+  return [new deck.PathLayer({
+    id: "arcs", data: arcData, pickable: true, widthUnits: "pixels", capRounded: true, jointRounded: true,
+    getPath: (r) => arcPath(sites[r.a], sites[r.b], lift),
+    getColor: (r) => rgb(r.contested ? "--dispute" : "--assert", 190),
+    getWidth: (r) => Math.min(1 + Math.sqrt(r.n) * 1.2, 6),
+    updateTriggers: { getPath: [globe], getColor: [arcData] },
+    autoHighlight: true, highlightColor: [255, 200, 0, 255],
+    onHover: (info) => {
+      map.getCanvas().style.cursor = info.object ? "pointer" : "";
+      if (!pop) return;
+      if (!info.object) return pop.remove();
+      const r = info.object;
+      pop.setLngLat(info.coordinate).setHTML(`${esc(sites[r.a].name)} ↔ ${esc(sites[r.b].name)}<br>${r.n} claims` +
+        (r.contested ? ` · <span style="color:${css("--dispute")}">contested</span>` : "")).addTo(map);
+    },
+    onClick: (info) => {
+      if (map.queryRenderedFeatures([info.x, info.y], { layers: ["sites"] }).length) return;
+      select({ arc: [info.object.a, info.object.b] });
+    },
+  })];
+}
+
+function buildGeo(active) {
+  const per = new Map(), arcs = new Map();
+  for (const c of active) {
+    for (const i of new Set([c.a, c.b])) {
+      if (i == null) continue;
+      const r = per.get(i) || { n: 0, contested: 0, vps: new Set() };
+      r.n++; if (c.st !== "asserts") r.contested++; r.vps.add(c.v); per.set(i, r);
+    }
+    if (c.a != null && c.b != null && c.a !== c.b) {
+      const k = c.a < c.b ? `${c.a}-${c.b}` : `${c.b}-${c.a}`;
+      const r = arcs.get(k) || { a: Math.min(c.a, c.b), b: Math.max(c.a, c.b), n: 0, contested: 0 };
+      r.n++; if (c.st !== "asserts") r.contested++; arcs.set(k, r);
+    }
+  }
+  const points = { type: "FeatureCollection", features: [...per].map(([i, r]) => ({
+    type: "Feature", id: i, geometry: { type: "Point", coordinates: [sites[i].lon, sites[i].lat] },
+    properties: { i, n: r.n, contested: r.contested > 0 ? 1 : 0, multi: sites[i].senses.length >= 3 ? 1 : 0,
+      name: sites[i].name, vps: r.vps.size } })) };
+  return { points, arcs: [...arcs.values()], nSites: per.size, nArcs: arcs.size };
+}
+
+let ready = false;
+map.on("load", () => {
+  map.addSource("sites", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  map.addLayer({ id: "sites", type: "circle", source: "sites", paint: {
+    "circle-radius": ["interpolate", ["linear"], ["sqrt", ["get", "n"]], 1, 3.5, 20, 26],
+    "circle-color": ["case", ["==", ["get", "contested"], 1], css("--dispute"), css("--assert")],
+    "circle-opacity": 0.72,
+    "circle-stroke-color": ["case", ["==", ["get", "multi"], 1], css("--sense"), "#ffffff"],
+    "circle-stroke-width": ["case", ["boolean", ["feature-state", "sel"], false], 3.5, ["==", ["get", "multi"], 1], 2.2, 0.6] } });
+  if (!LAND) map.addLayer({ id: "labels", type: "symbol", source: "sites", filter: [">=", ["get", "n"], 25],
+    layout: { "text-field": ["get", "name"], "text-size": 11, "text-offset": [0, 1.3], "text-anchor": "top" },
+    paint: { "text-color": css("--ink"), "text-halo-color": css("--panel"), "text-halo-width": 1.2 } });
+
+  pop = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 8 });
+  map.on("mousemove", "sites", (e) => {
+    map.getCanvas().style.cursor = "pointer";
+    const p = e.features[0].properties, s = sites[p.i];
+    pop.setLngLat(e.lngLat).setHTML(`<b>${esc(p.name)}</b><br>${p.n} claims · ${p.vps} viewpoints` +
+      (s.senses.length > 1 ? `<br>${s.senses.length} senses: ${s.senses.map((x) => esc(x.sense || "—")).join("; ")}` : "") +
+      (p.contested ? `<br><span style="color:${css("--dispute")}">contested</span>` : "")).addTo(map);
+  });
+  map.on("mouseleave", "sites", () => { map.getCanvas().style.cursor = ""; pop.remove(); });
+  map.on("click", "sites", (e) => select({ site: e.features[0].properties.i }));
+  try { map.setSky({ "atmosphere-blend": ["interpolate", ["linear"], ["zoom"], 0, 1, 5, 1, 7, 0] }); } catch (_) {}
+  overlay = new deck.MapboxOverlay({ interleaved: true, layers: [] });
+  map.addControl(overlay);
+  applyProjection();
+  ready = true; update();
+});
+
+// ---- detail panel ----------------------------------------------------------
+let selFeature = null;
+function select(sel) {
+  if (selFeature != null && ready) map.setFeatureState({ source: "sites", id: selFeature }, { sel: false });
+  selFeature = sel.site ?? null;
+  if (selFeature != null && ready) map.setFeatureState({ source: "sites", id: selFeature }, { sel: true });
+  state.selected = sel; renderDetail();
+}
+function claimHTML(c) {
+  const doc = DATA.docs[c.d] || c.d;
+  return `<div class="claim"><div class="spo">${esc(c.s)} <span class="muted">${esc(c.p)}</span> ${esc(c.o)}</div>
+    <div class="small"><span class="tag t-${esc(c.st)}">${esc(c.st)}</span>${c.y != null ? `<b>${c.y}</b> ` : ""}<span class="muted">${esc(c.w)}</span>
+    ${c.se ? `<span class="muted"> · ${esc(c.se)}</span>` : ""}${c.r ? `<span class="muted"> · repaired by judge</span>` : ""}</div>
+    ${c.q ? `<blockquote>“${esc(c.q)}”</blockquote>` : ""}<div class="muted small">${esc(doc)}</div></div>`;
+}
+function renderDetail() {
+  const sel = state.selected; if (!sel) return;
+  let head = "", rel;
+  if (sel.site != null) {
+    const s = sites[sel.site];
+    rel = claims.filter((c) => c.a === sel.site || c.b === sel.site);
+    head = `<h1 style="font-size:18px;margin:0 0 4px">${esc(s.name)}</h1>
+      <div class="muted small">${s.lat.toFixed(2)}, ${s.lon.toFixed(2)} · ${s.mentions} mentions</div>
+      <h2>Senses at this location ${s.senses.length > 1 ? "(kept distinct)" : ""}</h2>
+      <ul class="senses small" style="padding-left:18px;margin:0">${s.senses.map((p) =>
+        `<li><b>${esc(p.label)}</b> <span class="muted">${esc(p.sense || "no sense recorded")} · ${p.mentions} mentions</span>` +
+        (p.qid ? `<br><a href="https://www.wikidata.org/wiki/${encodeURIComponent(p.qid)}" target="_blank" rel="noopener">${esc(p.qid)}</a>` +
+          ` <span class="muted">${esc(p.wdesc || "")}${p.start || p.end ? ` (${esc(p.start ?? "?")}–${esc(p.end ?? "")})` : ""}</span>`
+          : `<br><span class="muted">located via built-in gazetteer</span>`) + `</li>`).join("")}</ul>`;
+  } else {
+    const [a, b] = sel.arc;
+    rel = claims.filter((c) => (c.a === a && c.b === b) || (c.a === b && c.b === a));
+    head = `<h1 style="font-size:18px;margin:0 0 4px">${esc(sites[a].name)} ↔ ${esc(sites[b].name)}</h1>`;
+  }
+  const shown = rel.filter((c) => passesNonTime(c) && passesTime(c));
+  const groups = {};
+  shown.forEach((c) => (groups[c.v] ||= []).push(c));
+  const order = Object.entries(groups).sort((x, y) => y[1].length - x[1].length);
+  const stances = new Set(shown.map((c) => c.st));
+  $("detail").innerHTML = head +
+    `<h2>Claims · ${shown.length} of ${rel.length} match filters · ${order.length} viewpoints</h2>` +
+    (stances.size > 1 ? `<p class="small" style="color:var(--dispute)">Viewpoints differ in stance here. They are shown side by side, not reconciled.</p>` : "") +
+    order.map(([vp, cs]) => `<div class="vp">${esc(vp)} <span class="muted small">(${cs.length})</span></div>` +
+      cs.sort((x, y) => (x.y ?? 9999) - (y.y ?? 9999)).map(claimHTML).join("")).join("");
+}
+
+// ---- timeline --------------------------------------------------------------
+function renderTimeline(base) {
+  const nb = (Y1 - Y0) / BIN, bins = new Array(nb).fill(0);
+  for (const c of base) if (c.y != null && c.y >= Y0 && c.y < Y1) bins[Math.floor((c.y - Y0) / BIN)]++;
+  const max = Math.max(1, ...bins), W = 1000, H = 72, bw = W / nb;
+  let s = "";
+  bins.forEach((n, i) => {
+    const y = Y0 + i * BIN, on = y >= state.y0 && y < state.y1, h = (n / max) * (H - 14);
+    s += `<rect data-y="${y}" x="${i * bw + 0.5}" y="${H - 12 - h}" width="${Math.max(1, bw - 1)}" height="${Math.max(h, 0.5)}" fill="${on ? css("--bar-on") : css("--bar")}"><title>${y}s: ${n} claims</title></rect>`;
+    if (y % 50 === 0) s += `<text x="${i * bw}" y="${H - 1}" font-size="10" fill="${css("--muted")}">${y}</text>`;
+  });
+  const svg = $("tl-svg"); svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.innerHTML = s;
+  $("range-label").textContent = state.y0 === Y0 && state.y1 === Y1 ? `${Y0}–${Y1} (all)` : `${state.y0}–${state.y1 - 1}`;
+}
+$("tl-svg").onclick = (e) => {
+  const y = +e.target.dataset?.y; if (!e.target.dataset?.y) return;
+  if (e.shiftKey && !(state.y0 === Y0 && state.y1 === Y1)) { state.y0 = Math.min(state.y0, y); state.y1 = Math.max(state.y1, y + BIN); }
+  else { state.y0 = y; state.y1 = y + BIN; }
+  setUndated(false); update();
+};
+$("reset-time").onclick = () => { stopPlay(); state.y0 = Y0; state.y1 = Y1; setUndated(true); update(); };
+let timer = null;
+function setUndated(v) { state.undated = v; $("undated").checked = v; }
+function stopPlay() { clearInterval(timer); timer = null; $("play").textContent = "▶ Play"; }
+$("play").onclick = () => {
+  if (timer) return stopPlay();
+  const WIN = 30; state.y0 = Y0; state.y1 = Y0 + WIN; $("play").textContent = "❚❚ Pause"; setUndated(false); update();
+  timer = setInterval(() => { if (state.y1 >= Y1) return stopPlay(); state.y0 += BIN; state.y1 += BIN; update(); }, 700);
+};
+
+// ---- update ----------------------------------------------------------------
+function update() {
+  const base = claims.filter(passesNonTime);
+  const active = base.filter(passesTime);
+  renderTimeline(base);
+  if (ready) {
+    const g = buildGeo(active);
+    map.getSource("sites").setData(g.points);
+    arcData = g.arcs; labelData = g.points.features.filter((f) => f.properties.n >= 25);
+    overlay.setProps({ layers: overlayLayers() });
+    if (selFeature != null) map.setFeatureState({ source: "sites", id: selFeature }, { sel: true });
+    $("stats").textContent = `${active.length.toLocaleString()} claims · ${g.nSites} places · ${g.nArcs} links`;
+  }
+  renderDetail();
+}
+update();
+</script>
+</body>
+</html>
