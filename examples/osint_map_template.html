@@ -66,6 +66,11 @@ button { font: inherit; border: 1px solid var(--line); background: var(--bg); co
 .vp { margin-top: 12px; font-weight: 600; font-size: 13px; color: var(--accent); }
 .senses li { margin: 4px 0; }
 .senses a { color: var(--accent); }
+.plink { color: var(--accent); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+.plink:hover, .plink:focus-visible { text-decoration-thickness: 2px; }
+.claim-foot { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; justify-content: space-between; }
+button.route { font-size: 11.5px; padding: 1px 7px; color: var(--accent); }
+button:focus-visible, .plink:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .maplibregl-popup-content { background: var(--panel); color: var(--ink); font-size: 12.5px; padding: 6px 9px; }
 #tl-svg { width: 100%; height: 72px; display: block; }
 #tl-svg rect { cursor: pointer; }
@@ -236,15 +241,17 @@ function overlayLayers() {
     parameters: { depthCompare: "always" } }));
   return layers;
 }
+const selKey = () => (state.selected?.arc || []).join("-");
+const isSelArc = (r) => { const s = state.selected?.arc; return !!s && ((s[0] === r.a && s[1] === r.b) || (s[0] === r.b && s[1] === r.a)); };
 function arcLayers() {
   if (!state.arcs) return [];
   const lift = globe ? 0.18 : 0.12;
   return [new deck.PathLayer({
     id: "arcs", data: arcData, pickable: true, widthUnits: "pixels", capRounded: true, jointRounded: true,
     getPath: (r) => arcPath(sites[r.a], sites[r.b], lift),
-    getColor: (r) => rgb(r.contested ? "--dispute" : "--assert", 190),
-    getWidth: (r) => Math.min(1 + Math.sqrt(r.n) * 1.2, 6),
-    updateTriggers: { getPath: [globe], getColor: [arcData] },
+    getColor: (r) => isSelArc(r) ? [255, 190, 0, 255] : rgb(r.contested ? "--dispute" : "--assert", 190),
+    getWidth: (r) => isSelArc(r) ? 6 : Math.min(1 + Math.sqrt(r.n) * 1.2, 6),
+    updateTriggers: { getPath: [globe], getColor: [arcData, selKey()], getWidth: [arcData, selKey()] },
     autoHighlight: true, highlightColor: [255, 200, 0, 255],
     onHover: (info) => {
       map.getCanvas().style.cursor = info.object ? "pointer" : "";
@@ -319,14 +326,40 @@ function select(sel) {
   selFeature = sel.site ?? null;
   if (selFeature != null && ready) map.setFeatureState({ source: "sites", id: selFeature }, { sel: true });
   state.selected = sel; renderDetail();
+  if (overlay) overlay.setProps({ layers: overlayLayers() });
 }
-function claimHTML(c) {
+// A place mention in a claim becomes a link when it is a mapped place other than the one shown.
+const placeLink = (text, i, here) => i != null && i !== here
+  ? `<a href="#" class="plink" data-site="${i}" title="Go to ${esc(sites[i].name)}">${esc(text)}</a>` : esc(text);
+function claimHTML(c, here) {
   const doc = DATA.docs[c.d] || c.d;
-  return `<div class="claim"><div class="spo">${esc(c.s)} <span class="muted">${esc(c.p)}</span> ${esc(c.o)}</div>
+  const route = c.a != null && c.b != null && c.a !== c.b;
+  return `<div class="claim"><div class="spo">${placeLink(c.s, c.a, here)} <span class="muted">${esc(c.p)}</span> ${placeLink(c.o, c.b, here)}</div>
     <div class="small"><span class="tag t-${esc(c.st)}">${esc(c.st)}</span>${c.y != null ? `<b>${c.y}</b> ` : ""}<span class="muted">${esc(c.w)}</span>
     ${c.se ? `<span class="muted"> · ${esc(c.se)}</span>` : ""}${c.r ? `<span class="muted"> · repaired by judge</span>` : ""}</div>
-    ${c.q ? `<blockquote>“${esc(c.q)}”</blockquote>` : ""}<div class="muted small">${esc(doc)}</div></div>`;
+    ${c.q ? `<blockquote>“${esc(c.q)}”</blockquote>` : ""}<div class="muted small claim-foot"><span>${esc(doc)}</span>${route
+      ? `<button type="button" class="route" data-arc="${c.a},${c.b}">Show route ${esc(sites[c.a].name)} ↔ ${esc(sites[c.b].name)}</button>` : ""}</div></div>`;
 }
+function flyToSite(i) {
+  const s = sites[i];
+  map.flyTo({ center: [s.lon, s.lat], zoom: Math.max(map.getZoom(), 3.5), essential: true });
+  select({ site: i });
+}
+function flyToArc(a, b) {
+  const A = sites[a], B = sites[b];
+  let lonB = B.lon; if (lonB - A.lon > 180) lonB -= 360; else if (A.lon - lonB > 180) lonB += 360;
+  map.fitBounds([[Math.min(A.lon, lonB), Math.min(A.lat, B.lat)], [Math.max(A.lon, lonB), Math.max(A.lat, B.lat)]],
+    { padding: 70, maxZoom: 5, essential: true });
+  select({ arc: [a, b] });
+}
+$("detail").addEventListener("click", (e) => {
+  const el = e.target.closest("[data-site],[data-arc]"); if (!el) return;
+  e.preventDefault();
+  // On a phone the map sits above this panel: bring it into view to show the fly-to.
+  if (window.innerWidth <= 900) $("map").scrollIntoView({ behavior: "smooth", block: "start" });
+  if (el.dataset.site != null) flyToSite(+el.dataset.site);
+  else { const [a, b] = el.dataset.arc.split(",").map(Number); flyToArc(a, b); }
+});
 function renderDetail() {
   const sel = state.selected; if (!sel) return;
   let head = "", rel;
@@ -344,7 +377,7 @@ function renderDetail() {
   } else {
     const [a, b] = sel.arc;
     rel = claims.filter((c) => (c.a === a && c.b === b) || (c.a === b && c.b === a));
-    head = `<h1 style="font-size:18px;margin:0 0 4px">${esc(sites[a].name)} ↔ ${esc(sites[b].name)}</h1>`;
+    head = `<h1 style="font-size:18px;margin:0 0 4px">${placeLink(sites[a].name, a)} ↔ ${placeLink(sites[b].name, b)}</h1>`;
   }
   const shown = rel.filter((c) => passesNonTime(c) && passesTime(c));
   const groups = {};
@@ -355,7 +388,7 @@ function renderDetail() {
     `<h2>Claims · ${shown.length} of ${rel.length} match filters · ${order.length} viewpoints</h2>` +
     (stances.size > 1 ? `<p class="small" style="color:var(--dispute)">Viewpoints differ in stance here. They are shown side by side, not reconciled.</p>` : "") +
     order.map(([vp, cs]) => `<div class="vp">${esc(vp)} <span class="muted small">(${cs.length})</span></div>` +
-      cs.sort((x, y) => (x.y ?? 9999) - (y.y ?? 9999)).map(claimHTML).join("")).join("");
+      cs.sort((x, y) => (x.y ?? 9999) - (y.y ?? 9999)).map((c) => claimHTML(c, sel.site)).join("")).join("");
 }
 
 // ---- timeline --------------------------------------------------------------
