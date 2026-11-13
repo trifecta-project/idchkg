@@ -36,6 +36,7 @@ idchkg build examples/corpus --link-dbpedia -o out     # also link entities to D
 idchkg link out/graph.db                               # enrich an existing graph.db with DBpedia links (no rebuild)
 idchkg link out/graph.db --target wikidata --types place   # link to Wikidata instead (coords P625, start/end dates); cached on disk
 python examples/osint_map.py out/graph.db -o out/osint_map.html   # interactive globe/map "atlas" of place claims
+open examples/atlas_demo.html                          # committed example atlas (commodities corpus, Wikidata-linked); regenerate rather than hand-edit
 python examples/corpora/fetch.py                       # populate real corpora (Gutenberg + Wikipedia) into gitignored raw/ & wiki/
 ```
 
