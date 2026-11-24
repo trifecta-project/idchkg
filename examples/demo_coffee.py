@@ -8,6 +8,8 @@ for a real backend (see README) to run it for real.
     python examples/demo_coffee.py
 """
 
+import os
+
 from idchkg.llm.mock import MockLLM
 from idchkg.models import CEASE, GAINS, EvolutionEvent
 from idchkg.models import Document
@@ -47,24 +49,30 @@ extraction = {
     ],
     "claims": [
         claim("coffee", "native to", "Ethiopia",
-              subject_sense="plant", when="before 15th century"),
+              subject_sense="plant", when="before 15th century",
+              quote="The plant is native to the highlands of Ethiopia"),
         claim("coffee", "cultivated in", "Yemen",
-              subject_sense="plant", when="15th century"),
+              subject_sense="plant", when="15th century",
+              quote="By the fifteenth century coffee was cultivated in Yemen"),
         claim("coffee", "brewed from", "coffee",
               subject_sense="beverage", object_sense="plant",
-              context="the drink is made from the plant's seeds"),
+              context="the drink is made from the plant's seeds",
+              quote="Coffee is a beverage brewed from the roasted seeds of the coffee plant."),
         # two viewpoints, same subject+predicate, opposing stance (a conflict)
         claim("coffee", "was", "civilising luxury",
               subject_sense="commodity", context="17th-century coffeehouses",
               viewpoint="colonial writers", stance="asserts", sentiment="positive",
-              when="17th century"),
+              when="17th century",
+              quote="coffee was a civilising luxury that refined social life in the coffeehouses of the seventeenth century"),
         claim("coffee", "was", "product of forced labour",
               subject_sense="commodity", context="colonial plantations",
               viewpoint="historians", stance="disputes", sentiment="negative",
-              when="17th century"),
+              when="17th century",
+              quote="the plantations that supplied it depended on colonial expansion and forced labour"),
         claim("coffee", "inseparable from", "colonialism",
               subject_sense="commodity",
-              viewpoint="historians", stance="asserts", sentiment="negative"),
+              viewpoint="historians", stance="asserts", sentiment="negative",
+              quote="coffee's spread is inseparable from colonialism"),
     ],
 }
 
@@ -117,3 +125,8 @@ print(f"  provenance of one claim: source={prov['document_id']}/{prov['chunk_id'
 print("\n== Complementary — conflicting viewpoints a flat KG would erase ==")
 for group in kg.conflicts():
     print("  " + " | ".join(f"{c.perspective.viewpoint}: {c.object}" for c in group))
+
+# Save the graph, so the static site can be built from it: idchkg site out/coffee_graph.json -o site
+os.makedirs("out", exist_ok=True)
+kg.save_json("out/coffee_graph.json")
+print("\nsaved out/coffee_graph.json")
